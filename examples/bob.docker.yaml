@@ -1,0 +1,24 @@
+agent_id: bob
+owner_name: Bob
+host: 0.0.0.0
+port: 8702
+public_url: http://bob:8702
+owner_token: ${BOB_OWNER_TOKEN}
+timezone: Asia/Seoul
+work_hours: [9, 18]
+db_path: /app/data/bob.db
+busy:
+  - {start: "2026-11-17T11:00", end: "2026-11-17T13:00"}
+facts:
+  - {text: "Bob is a DRAM test engineer in Icheon.", visibility: public}
+  - {text: "Bob is vegetarian.", visibility: trusted}
+  - {text: "Bob is preparing a job transfer.", visibility: private}
+peers:
+  alice:
+    url: http://alice:8701
+    token: ${AB_PEER_TOKEN}
+    scopes: [availability, meeting, profile.trusted]   # add meeting.auto_accept to skip approval
+llm:
+  base_url: ${NIXIE_LLM_BASE_URL}
+  api_key: ${NIXIE_LLM_API_KEY}
+  model: ${NIXIE_LLM_MODEL}

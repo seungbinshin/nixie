@@ -1,0 +1,18 @@
+# Two agents on one host for MVP validation. Copy examples/.env.example to .env first.
+services:
+  alice:
+    build: .
+    env_file: .env
+    command: ["/app/config.yaml"]
+    volumes:
+      - ./examples/alice.docker.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+    ports: ["8701:8701"]
+  bob:
+    build: .
+    env_file: .env
+    command: ["/app/config.yaml"]
+    volumes:
+      - ./examples/bob.docker.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+    ports: ["8702:8702"]
