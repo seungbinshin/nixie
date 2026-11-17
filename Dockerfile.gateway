@@ -1,0 +1,12 @@
+# Always-on gateway. Starts per-user agent containers on demand through the container CLI.
+FROM python:3.12-slim
+WORKDIR /app
+COPY certs/ /usr/local/share/ca-certificates/nixie/
+RUN update-ca-certificates >/dev/null 2>&1 || true
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io && rm -rf /var/lib/apt/lists/*
+COPY pyproject.toml ./
+COPY nixie ./nixie
+RUN pip install --no-cache-dir .
+EXPOSE 8080
+ENTRYPOINT ["nixie", "gateway"]

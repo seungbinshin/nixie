@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -11,11 +12,12 @@ import httpx
 
 from . import narrate
 from .config import AgentConfig, Fact
-from .llm import LLM
+from .models import ModelRouter
 from .peer import PeerError, send_intent
 from .policy import Policy, PolicyError
 from .schedule import free_slots, intersect
 from .store import Store
+from .tools import NotAvailable, TaskRouter, ToolError
 
 
 def _dt(s: str, tz) -> datetime:
@@ -28,14 +30,17 @@ class NixieAgent:
         self,
         cfg: AgentConfig,
         store: Store | None = None,
-        llm: LLM | None = None,
+        llm: ModelRouter | None = None,
         peer_transport: httpx.AsyncBaseTransport | None = None,
+        tool_transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.cfg = cfg
         self.store = store or Store(cfg.db_path)
         self.policy = Policy(cfg)
-        self.llm = llm or LLM(cfg.llm)
+        self.llm = llm or ModelRouter(cfg.models)  # fast by default, pro only when needed
         self.peer_transport = peer_transport  # injectable for tests
+        self.user = os.environ.get("NIXIE_USER") or cfg.agent_id
+        self.tasks = TaskRouter(cfg, self.user, tool_transport)
 
     # ---------- calendar ----------
     def busy(self) -> list[tuple[datetime, datetime]]:
@@ -117,6 +122,18 @@ class NixieAgent:
 
     async def decide(self, approval_id: str, approve: bool) -> dict[str, Any]:
         a = self.store.get_approval(approval_id)
+        if a and a["kind"] == "skill_action" and a["status"] == "pending":
+            if not approve:
+                self.store.set_approval_status(approval_id, "declined")
+                return {"status": "declined", **a["payload"]}
+            self.store.set_approval_status(approval_id, "approved")
+            try:
+                res = await self.tasks.run_skill(a["payload"]["skill"], a["payload"]["params"])
+            except (ToolError, NotAvailable) as e:
+                self.store.set_approval_status(approval_id, "failed")
+                return {"status": "failed", "error": str(e), **a["payload"]}
+            self.store.audit("tool", "-", a["payload"]["skill"], {"route": res["route"]})
+            return res
         if not a or a["kind"] != "inbound_proposal" or a["status"] != "pending":
             return {"status": "not_found"}
         p = a["payload"]
@@ -197,8 +214,22 @@ class NixieAgent:
             "Answer ONLY from the facts below. If the facts do not contain the answer, say you cannot share it. "
             "Never invent facts.\nFacts:\n- " + "\n- ".join(facts or ["(none)"])
         )
-        msg = await self.llm.chat([{"role": "system", "content": system}, {"role": "user", "content": question}])
+        msg = await self.llm.chat([{"role": "system", "content": system}, {"role": "user", "content": question}],
+                                  kind="peer_answer")
         return msg.get("content") or ""
+
+    # ---------- business tasks (API > CLI > browser) ----------
+    async def do_task(self, skill: str, params: dict[str, Any]) -> dict[str, Any]:
+        sk = self.tasks.skills.get(skill)
+        if sk is None:
+            raise ToolError(f"unknown skill {skill!r}")
+        if sk.confirm:
+            aid = self.store.add_approval("skill_action", "-", {"skill": skill, "title": sk.title, "params": params})
+            return {"status": "pending_owner_approval", "approval_id": aid, "skill": skill,
+                    "detail": f"'{sk.title}' needs owner approval before it runs"}
+        res = await self.tasks.run_skill(skill, params)
+        self.store.audit("tool", "-", skill, {"route": res["route"]})
+        return res
 
     # ---------- owner chat ----------
     TOOLS = [
@@ -213,7 +244,23 @@ class NixieAgent:
         {"type": "function", "function": {"name": "remember", "description": "Save a fact about the owner",
          "parameters": {"type": "object", "properties": {"text": {"type": "string"},
                         "visibility": {"type": "string", "enum": ["private", "trusted", "public"]}}, "required": ["text"]}}},
-        {"type": "function", "function": {"name": "list_approvals", "description": "List pending meeting requests",
+        {"type": "function", "function": {"name": "list_skills",
+         "description": "List in-house work skills (meeting rooms, leave, approvals, document search, IT tickets) and their routes",
+         "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "do_task",
+         "description": "Run an in-house work skill. Preferred over run_shell and browse. Irreversible skills wait for owner approval.",
+         "parameters": {"type": "object", "properties": {"skill": {"type": "string"}, "params": {"type": "object"}},
+                        "required": ["skill", "params"]}}},
+        {"type": "function", "function": {"name": "run_shell",
+         "description": "Run one allow-listed CLI program (no shell syntax) in the owner's workspace. Use for API/CLI work that no skill covers.",
+         "parameters": {"type": "object", "properties": {"argv": {"type": "array", "items": {"type": "string"}}},
+                        "required": ["argv"]}}},
+        {"type": "function", "function": {"name": "browse",
+         "description": "LAST RESORT. Leased shared browser with the owner's cookies. Only for screens that need real clicks and have no API/CLI.",
+         "parameters": {"type": "object", "properties": {
+             "reason": {"type": "string", "description": "why API/CLI cannot do this"},
+             "steps": {"type": "array", "items": {"type": "object"}}}, "required": ["reason", "steps"]}}},
+        {"type": "function", "function": {"name": "list_approvals", "description": "List pending requests that need the owner's decision",
          "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "decide_approval", "description": "Approve or decline a pending request",
          "parameters": {"type": "object", "properties": {"approval_id": {"type": "string"}, "approve": {"type": "boolean"}},
@@ -229,26 +276,50 @@ class NixieAgent:
             if name == "remember":
                 return {"id": self.store.add_memory(args["text"], args.get("visibility", "private"))}
             if name == "list_approvals":
-                return [a for a in self.store.approvals("pending") if a["kind"] == "inbound_proposal"]
+                return self.pending_approvals()
             if name == "decide_approval":
                 return await self.decide(args["approval_id"], bool(args["approve"]))
-        except (PeerError, PolicyError, ValueError, KeyError, TypeError) as e:
+            if name == "list_skills":
+                return self.tasks.catalog()
+            if name == "do_task":
+                return await self.do_task(args["skill"], dict(args.get("params") or {}))
+            if name == "run_shell":
+                return await self.tasks.shell.run(list(args["argv"]))
+            if name == "browse":
+                return await self.tasks.browse(list(args["steps"]), args.get("reason", ""))
+        except (PeerError, PolicyError, ToolError, NotAvailable, ValueError, KeyError, TypeError) as e:
             return {"error": str(e)}
         return {"error": f"unknown tool {name}"}
+
+    def pending_approvals(self) -> list[dict[str, Any]]:
+        return [a for a in self.store.approvals("pending") if a["kind"] in ("inbound_proposal", "skill_action")]
+
+    def system_prompt(self) -> str:
+        now = datetime.now(self.cfg.tz).isoformat(timespec="minutes")
+        facts = "\n- ".join([f.text for f in self.cfg.facts + self._memory_facts()] or ["(none)"])
+        skills = ", ".join(f"{s.id} ({s.title})" for s in self.tasks.skills.values()) or "none"
+        return (
+            f"You are Nixie, the in-house work assistant of {self.cfg.owner_name}, an SK hynix employee. "
+            f"Now: {now} ({self.cfg.timezone}). You are a daily-work expert, not a coding tool.\n"
+            "You handle: colleague scheduling through their agents, meeting rooms, leave and attendance, "
+            "approvals, internal document and regulation search, IT helpdesk requests.\n"
+            "Rules:\n"
+            "1. Prefer do_task with a skill. If no skill fits, use run_shell (API/CLI). Use browse only when a screen "
+            "needs real clicks and no API/CLI exists; give the reason.\n"
+            "2. Irreversible actions wait for the owner's approval; tell the owner the approval id.\n"
+            "3. Never share confidential company information with other people's agents.\n"
+            "4. Reply briefly in the owner's language.\n"
+            f"Skills: {skills}\nPeer agents: {', '.join(sorted(self.cfg.peers)) or 'none'}\nOwner facts:\n- {facts}"
+        )
 
     async def owner_chat(self, text: str) -> str:
         if text.startswith("/") or not self.llm.enabled:
             return await self._command(text)
-        now = datetime.now(self.cfg.tz).isoformat(timespec="minutes")
-        system = (
-            f"You are Nixie, the personal agent of {self.cfg.owner_name}. Now: {now} ({self.cfg.timezone}). "
-            f"Known peer agents: {', '.join(sorted(self.cfg.peers)) or 'none'}. "
-            "Use tools to act. Reply briefly in the owner's language.\nOwner facts:\n- "
-            + "\n- ".join([f.text for f in self.cfg.facts + self._memory_facts()] or ["(none)"])
-        )
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system}, {"role": "user", "content": text}]
-        for _ in range(5):
-            msg = await self.llm.chat(messages, tools=self.TOOLS)
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt()},
+                                          {"role": "user", "content": text}]
+        hint: str | None = None
+        for step in range(6):
+            msg = await self.llm.chat(messages, tools=self.TOOLS, kind="owner_chat", step=step, hint=hint)
             calls = msg.get("tool_calls") or []
             if not calls:
                 return msg.get("content") or ""
@@ -256,16 +327,21 @@ class NixieAgent:
             for c in calls:
                 args = json.loads(c["function"].get("arguments") or "{}")
                 result = await self._run_tool(c["function"]["name"], args)
+                if c["function"]["name"] == "do_task":
+                    sk = self.tasks.skills.get(args.get("skill", ""))
+                    if sk and sk.model_hint == "pro":
+                        hint = "pro"  # reading/summarizing this result is worth the stronger model
                 messages.append({"role": "tool", "tool_call_id": c["id"],
                                  "content": json.dumps(result, ensure_ascii=False, default=str)})
-        return "Stopped after 5 tool steps."
+        return "Stopped after 6 tool steps."
 
     HELP = (
         "Commands:\n"
         "/schedule <peer> <minutes> <window_start> <window_end> <title...>\n"
         "/ask <peer> <question...>\n"
         "/remember [private|trusted|public] <text...>\n"
-        "/approvals\n/approve <id>\n/decline <id>\n/events"
+        "/approvals\n/approve <id>\n/decline <id>\n/events\n"
+        "/skills\n/do <skill> key=value ...\n/sh <program> <args...>"
     )
 
     async def _command(self, text: str) -> str:
@@ -284,13 +360,20 @@ class NixieAgent:
                 body = args[1:] if vis == args[0] else args
                 return f"saved {self.store.add_memory(' '.join(body), vis)} ({vis})"
             if cmd == "approvals":
-                pend = [a for a in self.store.approvals("pending") if a["kind"] == "inbound_proposal"]
+                pend = self.pending_approvals()
                 return json.dumps(pend, ensure_ascii=False) if pend else "no pending requests"
+            if cmd == "skills":
+                return json.dumps(self.tasks.catalog(), ensure_ascii=False)
+            if cmd == "do" and args:
+                params = dict(a.split("=", 1) for a in args[1:] if "=" in a)
+                return json.dumps(await self.do_task(args[0], params), ensure_ascii=False, default=str)
+            if cmd == "sh" and args:
+                return json.dumps(await self.tasks.shell.run(args), ensure_ascii=False)
             if cmd in ("approve", "decline") and args:
                 return json.dumps(await self.decide(args[0], cmd == "approve"), ensure_ascii=False)
             if cmd == "events":
                 return json.dumps(self.store.events(), ensure_ascii=False)
-        except (PeerError, PolicyError, ValueError) as e:
+        except (PeerError, PolicyError, ToolError, NotAvailable, ValueError) as e:
             return f"error: {e}"
         if not self.llm.enabled and not text.startswith("/"):
             return "LLM is not configured (set NIXIE_LLM_BASE_URL). " + self.HELP

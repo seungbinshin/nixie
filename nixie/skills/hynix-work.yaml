@@ -1,0 +1,115 @@
+# SK hynix in-house work skills for Nixie.
+#
+# IMPORTANT: service names, paths, CLI names and portal selectors below are PLACEHOLDERS.
+# Replace them with the real in-house endpoints. Base URLs and tokens come from the agent config
+# (services:) and ${HYNIX_*} environment variables, never from this file.
+#
+# Route order is always: api -> cli -> browser. The browser route runs only when no api/cli route
+# is available (for example a portal screen that has no API).
+# confirm: true  -> the agent asks its owner before the action runs (irreversible actions).
+# model_hint: pro -> the agent may use the high-performance model to read/summarize the result.
+
+skills:
+  - id: room.search
+    title: 회의실 빈 곳 조회
+    description: Find free meeting rooms for a date and time.
+    params: {date: "YYYY-MM-DD", start: "HH:MM", end: "HH:MM", size: "people", site: "Icheon|Cheongju|Bundang"}
+    optional: [site]
+    strategies:
+      - type: api
+        service: room
+        method: GET
+        path: /v1/rooms/available
+        query: {date: "{date}", start: "{start}", end: "{end}", size: "{size}"}
+      - type: cli
+        argv: [hynix-room, search, --date, "{date}", --start, "{start}", --end, "{end}", --size, "{size}"]
+
+  - id: room.book
+    title: 회의실 예약
+    description: Book a meeting room.
+    params: {room_id: "id from room.search", date: "YYYY-MM-DD", start: "HH:MM", end: "HH:MM", title: "text"}
+    confirm: true
+    strategies:
+      - type: api
+        service: room
+        method: POST
+        path: /v1/reservations
+        body: {room_id: "{room_id}", date: "{date}", start: "{start}", end: "{end}", title: "{title}"}
+      - type: cli
+        argv: [hynix-room, book, "{room_id}", --date, "{date}", --start, "{start}", --end, "{end}", --title, "{title}"]
+
+  - id: leave.request
+    title: 휴가 신청
+    description: Submit a leave request in the HR system.
+    params: {kind: "annual|half_am|half_pm|sick", start: "YYYY-MM-DD", end: "YYYY-MM-DD", reason: "text"}
+    confirm: true
+    strategies:
+      - type: api
+        service: hr
+        method: POST
+        path: /v1/leave-requests
+        body: {kind: "{kind}", start: "{start}", end: "{end}", reason: "{reason}"}
+      # Fallback when the HR system has no API: drive the groupware screen.
+      - type: browser
+        steps:
+          - {action: goto, url: "${HYNIX_PORTAL_URL}/hr/leave/new"}
+          - {action: select, selector: "#kind", value: "{kind}"}
+          - {action: fill, selector: "#start", value: "{start}"}
+          - {action: fill, selector: "#end", value: "{end}"}
+          - {action: fill, selector: "#reason", value: "{reason}"}
+          - {action: click, selector: "#submit"}
+          - {action: text, selector: "#result"}
+
+  - id: leave.balance
+    title: 잔여 휴가 조회
+    description: Show remaining leave days.
+    params: {}
+    strategies:
+      - type: api
+        service: hr
+        method: GET
+        path: /v1/leave-balance
+      - type: browser
+        steps:
+          - {action: goto, url: "${HYNIX_PORTAL_URL}/hr/leave"}
+          - {action: text, selector: "#balance"}
+
+  - id: approval.pending
+    title: 결재 대기 문서 조회
+    description: List documents waiting for my approval.
+    params: {}
+    model_hint: pro
+    strategies:
+      - type: api
+        service: approval
+        method: GET
+        path: /v1/approvals
+        query: {status: pending}
+
+  - id: docs.search
+    title: 사내 문서·규정 검색
+    description: Search internal documents, regulations and wiki (e.g. GaiA knowledge search).
+    params: {query: "text"}
+    model_hint: pro
+    strategies:
+      - type: api
+        service: search
+        method: GET
+        path: /v1/search
+        query: {q: "{query}", limit: "5"}
+      - type: cli
+        argv: [hynix-search, "{query}", --limit, "5", --json]
+
+  - id: it.ticket
+    title: IT 헬프데스크 요청
+    description: Open an IT helpdesk ticket.
+    params: {category: "pc|account|network|software", summary: "text", detail: "text"}
+    confirm: true
+    strategies:
+      - type: api
+        service: itsm
+        method: POST
+        path: /v1/tickets
+        body: {category: "{category}", summary: "{summary}", detail: "{detail}"}
+      - type: cli
+        argv: [hynix-it, ticket, create, --category, "{category}", --summary, "{summary}", --detail, "{detail}"]

@@ -1,0 +1,48 @@
+# User disk: <users_root>/bob/agent.yaml (+ data/, workspace/, browser/ created on first start)
+agent_id: bob
+owner_name: Bob
+owner_token: ${BOB_OWNER_TOKEN}
+public_url: http://gateway:8080/u/bob        # peers reach this agent through the gateway
+timezone: Asia/Seoul
+work_hours: [9, 18]
+persona: hynix
+facts:
+  - {text: "Bob works in HBM application engineering.", visibility: public}
+peers:
+  alice:
+    url: http://gateway:8080/u/alice
+    token: ${AB_PEER_TOKEN}
+    scopes: [availability, meeting, profile.trusted]
+
+# Models: light model by default, in-house high-performance model only when needed.
+models:
+  fast:
+    base_url: ${NIXIE_FAST_BASE_URL}
+    api_key: ${NIXIE_FAST_API_KEY}
+    model: ${NIXIE_FAST_MODEL}
+  pro:
+    base_url: ${NIXIE_PRO_BASE_URL}
+    api_key: ${NIXIE_PRO_API_KEY}
+    model: kimi-k3.1-pro                  # or: deepseek-v4.1-flash (served model name)
+    extra: {reasoning_effort: high}       # Kimi K3.1 Pro: low|high|max (default max = most tokens)
+  max_tier: pro                           # set "fast" to forbid the pro model
+  escalate_after_tool_steps: 2
+  long_context_chars: 12000
+
+# In-house services (API route). Paths are defined in nixie/skills/hynix-work.yaml.
+services:
+  room:     {base_url: "${HYNIX_ROOM_API}",     token: "${HYNIX_ROOM_TOKEN}"}
+  hr:       {base_url: "${HYNIX_HR_API}",       token: "${HYNIX_HR_TOKEN}"}
+  approval: {base_url: "${HYNIX_APPROVAL_API}", token: "${HYNIX_APPROVAL_TOKEN}"}
+  search:   {base_url: "${HYNIX_SEARCH_API}",   token: "${HYNIX_SEARCH_TOKEN}"}
+  itsm:     {base_url: "${HYNIX_ITSM_API}",     token: "${HYNIX_ITSM_TOKEN}"}
+
+# CLI route: only these programs may run (no shell syntax).
+tools:
+  shell_allow: [curl, jq, hynix-room, hynix-search, hynix-it]
+  shell_timeout: 60
+
+# Browser route: shared pool, leased per job. No browser runs in this sandbox.
+browser_pool:
+  url: http://browser-pool:8090
+  token: ${NIXIE_BROWSER_POOL_TOKEN}

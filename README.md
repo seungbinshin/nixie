@@ -1,111 +1,105 @@
-# Nixie MVP
+# Nixie
 
-개인형 AI Agent입니다. 소유자 1명당 Agent 1개가 동작합니다. Agent끼리는 A2A Protocol(JSON-RPC 2.0 over HTTP)로 통신합니다.
-
-## 기능
-| 기능 | 설명 |
-|---|---|
-| 일정 조율 | 내 Agent가 상대 Agent에게 빈 시간을 묻습니다. 공통 슬롯을 찾아 회의를 제안합니다. |
-| 소유자 승인 | 상대 소유자가 승인해야 일정이 확정됩니다. `meeting.auto_accept` scope를 주면 승인 없이 확정됩니다. |
-| 정보 공유 제어 | 사실(fact)마다 공개 범위를 지정합니다: `public`, `trusted`, `private`. `private`는 다른 Agent에 공유하지 않습니다. |
-| 신뢰 관계 | 미리 등록한 peer만 요청할 수 있습니다. peer별 공유 토큰과 scope로 검사합니다. |
-| 소유자 대화 | LLM을 설정하면 자연어로 명령합니다(tool calling). LLM이 없으면 `/명령` 형식을 씁니다. |
-| Agent 간 대화 열람 | Agent 간 메시지마다 사람이 읽는 문장 1줄과 JSON 데이터를 함께 보냅니다. 양쪽 소유자는 같은 대화를 읽을 수 있습니다. 소유자는 대화에 글을 쓸 수 없습니다. |
-| 대화 무결성 | 대화 기록은 추가만 가능합니다(SQLite trigger로 수정·삭제 차단). 각 줄은 앞 줄의 hash를 포함합니다(hash chain). |
-| 감사 로그 | 모든 Agent 간 메시지를 SQLite에 기록합니다 (`GET /owner/audit`). |
+SK hynix 구성원을 위한 개인형 업무 Agent입니다. 코딩 도구가 아닙니다. Pickle처럼 일상 업무를 대신 처리하는 "사내 업무 expert"입니다.
+- 소유자 1명당 Agent 1개가 있습니다. Agent끼리는 A2A Protocol(JSON-RPC 2.0 over HTTP)로 통신합니다.
+- Agent 간 대화는 사람이 읽을 수 있습니다. 소유자는 대화를 읽기만 하고, 대화에 개입할 수 없습니다.
 
 ## 구조
 ```
-owner(웹/CLI) ──X-Owner-Token──▶ [Nixie Agent A] ◀──A2A JSON-RPC──▶ [Nixie Agent B] ◀── owner B
-                                   │ policy / store(SQLite) / LLM(OpenAI 호환)
-```
-- `nixie/agent.py`: 핵심 로직 (일정 협상, 승인, 질의 응답, 소유자 대화)
-- `nixie/app.py`: A2A 서버(Agent Card: `/.well-known/agent-card.json`, `/a2a/jsonrpc`), 소유자 API(`/owner/*`), 웹 채팅(`/`)
-- `nixie/peer.py`: A2A 클라이언트
-- `nixie/policy.py`: 인증, scope, 공개 범위
-- `nixie/schedule.py`: 빈 시간 계산
-
-## Agent 간 대화 (소유자는 읽기 전용)
-- 조회: `GET /owner/conversations`, `GET /owner/conversations/{id}`. 웹 채팅의 "agent conversations" 버튼으로도 봅니다.
-- 쓰기 경로가 없습니다: 대화 API는 GET만 제공합니다(POST/PUT/PATCH/DELETE는 405). 소유자 대화 도구에도 대화에 쓰는 기능이 없습니다.
-- 소유자가 하는 일은 대화 밖에 있습니다: (1) 요청 시작(목표 지정), (2) 사전 규칙 설정(scope, 공개 범위), (3) 결과 승인 또는 거절. 승인 결과는 Agent가 대화로 전달합니다.
-
-대화 예 (실제 출력):
-```
-alice: 안녕하세요, Alice님의 Agent입니다. Alice님이 'Lunch'(60분) 일정을 원합니다. 11/17 09:00–18:00 사이에 가능한 시간을 알려 주세요.
-  bob: Bob님은 다음 시간에 가능합니다: 11/17 09:00–10:00, ... 외 7개. (일정 내용은 공유하지 않습니다.)
-alice: 두 분 모두 가능한 11/17 13:00–14:00에 'Lunch'을(를) 제안합니다.
-  bob: Bob님께 승인을 요청했습니다. 결정이 나오면 이 대화로 알려 드리겠습니다.
-  bob: Bob님이 승인했습니다. 11/17 13:00–14:00 'Lunch' 일정을 확정합니다.
-alice: 확인했습니다. Alice님 일정에 등록했습니다.
+            ┌──────────── always on ────────────┐
+owner ──▶  │ gateway (/u/<user>/...)            │──start/stop──▶ [sandbox: agent of <user>]  (container / Kata / Firecracker)
+peer  ──▶  │  · Agent Card from disk (no start) │                   │ mounts ONLY <users_root>/<user>/
+agents     │  · idle reaper                     │                   │ API ─▶ in-house services (room, HR, approval, search, ITSM)
+            │ browser-pool (Chromium x N)       │◀──lease per job──│ CLI ─▶ allow-listed programs in workspace/
+            └───────────────────────────────────┘                   │ LLM ─▶ fast tier | pro tier (Kimi K3.1 Pro / DeepSeek V4.1 Flash class)
+disk (permanent): <users_root>/<user>/{agent.yaml, data/nixie.db, workspace/, browser/storage_state.json}
 ```
 
-## 참조 서비스 기능 대비 구현 범위
-Pickle과 Instinct는 Agent 간 통신 프로토콜과 내부 구조를 공개하지 않습니다. 따라서 공개 기사에 나온 기능만 비교합니다. 내부 구조는 비교할 수 없습니다.
-
-| 참조 기능 | 출처 | Nixie |
+## 설계 요구 사항과 구현
+| 요구 사항 | 구현 | 검증 |
 |---|---|---|
-| 친구의 Agent와 대화해 약속 시간 조율 | Pickle | 구현 (시간만. 장소·예약은 미구현) |
-| 소유자가 정한 규칙 안에서 동작 | Pickle | 구현 (peer별 scope, 자동 수락 여부) |
-| 공유 범위 제어 | Pickle | 구현 (fact별 public/trusted/private) |
-| 신뢰 관계 Agent끼리 직접 통신 (Trusted Person) | Instinct | 구현 (peer 등록 + 토큰 + scope) |
-| 상대 Agent에 일정 정보 공유 | Instinct | 구현 (빈 시간만 공유, 일정 내용 비공개) |
-| 결제 등 행동 전 소유자 승인 | Pickle, Instinct | 일정 확정에 적용. 결제 기능은 없음 |
-| 소유자 소개(매칭) | Pickle | 미구현 |
-| 메신저 채널 (SMS, iMessage, WhatsApp) | Instinct | 미구현 (웹, CLI만) |
-| 그룹 채팅 참여 | Instinct | 미구현 |
-| 메일·캘린더·외부 앱 연동 | Pickle, Instinct | 미구현 |
-| 클라우드 브라우저로 사이트 작업, 대리 전화 | Pickle, Instinct | 미구현 |
-| 자격 증명 금고 | Pickle | 미구현 |
-| 선제 알림 (아침 브리핑 등) | Pickle, Instinct | 미구현 |
-| 사람이 읽을 수 있고 소유자가 개입할 수 없는 Agent 간 대화 | Nixie 요구 사항 | 구현 |
+| 1. 사용자별 상시 샌드박스 없음. 디스크만 유지하고, 요청이 오면 컨테이너/microVM을 띄우고 유휴 시간이 지나면 내림 | `nixie/sandbox.py`, `nixie/gateway.py`. 게이트웨이가 `/u/<user>/...` 요청을 받으면 샌드박스를 시작합니다. 유휴 시간(`--idle-seconds`)이 지나면 reaper가 종료합니다. 처리 중인 요청이 있으면 종료하지 않습니다. Agent Card는 디스크의 설정으로 응답하므로 탐색 요청은 샌드박스를 깨우지 않습니다. Backend: `process`(개발), `container`(docker/nerdctl/podman, `--runtime`으로 `runc`, `io.containerd.kata.v2`, `runsc`, `aws.firecracker` 선택). 컨테이너는 `--read-only`, `--cap-drop ALL`, `no-new-privileges`, CPU·메모리 제한, 디스크 소유자 uid로 실행합니다. | `tests/test_sandbox.py`: 요청 시 기동 → 유휴 종료 → 재기동 후 승인 대기 상태 유지(디스크), A2A 요청이 상대 샌드박스를 깨움. Docker(runc) 컨테이너로 같은 수명 주기 확인 |
+| 2. 샌드박스에 Chromium 없음. 필요할 때만 공용 워커 풀에서 빌리고, 사용자 프로필/쿠키만 마운트 | `nixie/browser_pool.py`. 풀이 Chromium 워커 N개를 유지합니다. 작업 1건마다 워커 1개를 빌리고, 새 browser context에 그 사용자의 `browser/storage_state.json`(쿠키, localStorage)만 넣습니다. 작업 후 프로필을 사용자 디스크에 다시 쓰고 context를 닫습니다. 단계는 고정 DSL(goto, click, fill, select, press, wait_for, text)이고 임의 JavaScript는 없습니다. 허용 도메인 밖의 요청은 차단합니다. Agent 이미지(`Dockerfile`)에는 브라우저가 없습니다. | `tests/test_browser_pool.py`(실제 Chrome): SSO 쿠키가 다음 lease에서도 유지, 다른 사용자에게는 보이지 않음, 도메인·사용자 ID·토큰 검사 |
+| 3. API/CLI로 가능하면 shell에서 처리. 실제 클릭이 필요할 때만 브라우저 | `nixie/tools.py`. skill마다 경로를 여러 개 정의하고, 항상 API → CLI → 브라우저 순서로 시도합니다. 브라우저 경로는 API와 CLI 경로가 모두 없을 때만 사용합니다. API 오류(4xx/5xx)는 브라우저로 넘어가지 않습니다. CLI는 allowlist 프로그램만 shell 해석 없이 실행합니다(`argv`). 범용 `browse` 도구는 이유가 있어야 하고, API가 있는 호스트에는 거부됩니다. | `tests/test_tasks.py`: API 우선, API 없으면 CLI, 둘 다 없을 때만 브라우저로 사내 포털 양식 제출 |
+| 4. 코딩 도구가 아닌 사내 업무 expert. 필요할 때 사내 고성능 모델 연결 | `nixie/skills/hynix-work.yaml`: 회의실 조회·예약, 휴가 신청·잔여 조회, 결재 대기, 사내 문서·규정 검색, IT 요청. 되돌릴 수 없는 작업(`confirm: true`)은 소유자 승인 후 실행합니다. `nixie/models.py`: 기본은 `fast` tier입니다. 문서 요약 같은 무거운 작업, 긴 문맥, 긴 도구 루프, `fast` 실패 시에만 `pro` tier로 올립니다. `max_tier`로 상한을 정합니다. `pro`는 Kimi K3.1 Pro(`kimi-k3.1-pro`) 또는 DeepSeek V4.1 Flash 수준의 사내 OpenAI 호환 엔드포인트입니다. `extra`로 `reasoning_effort` 같은 모델별 값을 전달합니다. | `tests/test_models.py`: 기본 fast, 조건별 pro 승격, 실패 시 승격, 상한 적용, 문서 검색 후 요약만 pro 사용. `tests/test_tasks.py`: 승인 전 미실행 |
 
-## 요구 사항
-- Linux 또는 macOS, Python 3.11 이상 (Windows는 WSL2 사용)
-- 1인 MVP: 1 vCPU, RAM 1 GB, GPU 불필요 (LLM은 외부 또는 사내 API 사용)
-- 선택: OpenAI 호환 LLM 엔드포인트 (vLLM, Ollama `http://host:11434/v1`, LiteLLM, 사내 LLM 게이트웨이)
+## 기존 기능
+| 기능 | 설명 |
+|---|---|
+| 일정 조율 | 내 Agent가 상대 Agent에게 빈 시간을 묻고, 공통 슬롯을 제안합니다. 상대 소유자가 승인하면 확정됩니다. |
+| 정보 공유 제어 | 사실(fact)마다 공개 범위를 지정합니다: `public`, `trusted`, `private`. |
+| 신뢰 관계 | 등록한 peer만 요청할 수 있습니다. peer별 토큰과 scope로 검사합니다. |
+| Agent 간 대화 열람 | 메시지마다 사람이 읽는 문장 1줄과 JSON 데이터를 보냅니다. 양쪽 소유자가 같은 대화를 읽습니다. 쓰기 API는 없습니다(405). 기록은 추가만 가능하고 hash chain으로 무결성을 검사합니다. |
 
-## 설치 및 실행 (Python)
+## 실행 방법
+
+### A. 개발 (프로세스 backend, Docker 없음)
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[test]"
-cp examples/.env.example .env      # 토큰 값을 바꿉니다
-set -a; . ./.env; set +a
-nixie serve --config examples/alice.yaml &
-nixie serve --config examples/bob.yaml &
+mkdir -p /tmp/nixie-users && cp -r examples/users/* /tmp/nixie-users/
+set -a; . examples/.env.example; set +a        # 값을 바꾼 후 사용
+nixie gateway --users-root /tmp/nixie-users --backend process --port 8080 --idle-seconds 120 &
+nixie browser-pool --users-root /tmp/nixie-users --size 2 --allow-domain skhynix.com &   # Chromium 필요
 ```
+예제 사용자 설정의 `http://gateway:8080`과 `http://browser-pool:8090`은 개발 환경 주소로 바꿉니다.
 
-## 설치 및 실행 (Docker)
+### B. 운영형 (Docker Compose)
 ```bash
-cp examples/.env.example .env
-# 사내 TLS 프록시를 사용하면 루트 CA(PEM, *.crt)를 certs/ 폴더에 넣습니다.
-docker compose up -d --build
+cp examples/.env.example .env                  # 토큰, NIXIE_USERS_ROOT(절대 경로) 설정
+cp -r examples/users/* "$NIXIE_USERS_ROOT"/   # 사용자 디스크 준비
+docker build -t nixie:latest .                 # Agent 샌드박스 이미지 (브라우저 없음)
+docker compose up -d --build                   # gateway + browser-pool
 ```
+사내 TLS 프록시가 있으면 루트 CA(PEM, `*.crt`)를 `certs/`에 넣고 빌드합니다.
 
-## 사용 예
+### microVM runtime 선택
+| runtime | gateway 옵션 |
+|---|---|
+| runc (기본 컨테이너) | `--backend container` |
+| Kata Containers | `--backend container --runtime io.containerd.kata.v2` |
+| gVisor | `--backend container --runtime runsc` |
+| Firecracker (firecracker-containerd) | `--backend container --cli nerdctl --cli-arg=--address=/run/firecracker-containerd/containerd.sock --cli-arg=--snapshotter=devmapper --runtime aws.firecracker` |
+
+Kata와 Firecracker는 호스트에 KVM(`/dev/kvm`)이 필요합니다.
+
+## 사용 예 (게이트웨이 경유)
 ```bash
-# Alice가 Bob과 점심 일정을 요청합니다
-curl -X POST localhost:8701/owner/schedule -H "X-Owner-Token: $ALICE_OWNER_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"peer":"bob","title":"Lunch","duration_min":60,"window_start":"2026-11-17T09:00","window_end":"2026-11-17T18:00"}'
-# Bob이 대기 중인 요청을 확인하고 승인합니다
-curl localhost:8702/owner/approvals -H "X-Owner-Token: $BOB_OWNER_TOKEN"
-curl -X POST localhost:8702/owner/approvals/<id>/approve -H "X-Owner-Token: $BOB_OWNER_TOKEN"
-# 명령 모드 대화
-nixie chat --url http://127.0.0.1:8701 --token $ALICE_OWNER_TOKEN /ask bob "what food?"
+H="X-Owner-Token: $ALICE_OWNER_TOKEN"
+curl -H "$H" localhost:8080/u/alice/owner/skills                       # 사용 가능한 업무와 경로
+curl -H "$H" -X POST localhost:8080/u/alice/owner/chat -H 'Content-Type: application/json' \
+  -d '{"text":"/do docs.search query=출장비 규정"}'
+curl -H "$H" -X POST localhost:8080/u/alice/owner/chat -H 'Content-Type: application/json' \
+  -d '{"text":"/do leave.request kind=annual start=2026-11-20 end=2026-11-20 reason=개인"}'   # 승인 대기
+curl -H "$H" localhost:8080/u/alice/owner/approvals
+curl -H "$H" -X POST localhost:8080/u/alice/owner/approvals/<id>/approve                   # 이때 실행
+curl -H "X-Admin-Token: $NIXIE_ADMIN_TOKEN" localhost:8080/admin/sandboxes             # 실행 중 샌드박스
 ```
-웹 채팅: 브라우저에서 `http://<서버>:8701/`을 엽니다. 소유자 토큰을 입력합니다.
+명령: `/schedule`, `/ask`, `/remember`, `/approvals`, `/approve`, `/decline`, `/events`, `/skills`, `/do <skill> k=v ...`, `/sh <program> <args...>`. LLM을 설정하면 자연어로 요청합니다.
 
-명령 목록: `/schedule <peer> <분> <시작> <끝> <제목>`, `/ask <peer> <질문>`, `/remember [private|trusted|public] <내용>`, `/approvals`, `/approve <id>`, `/decline <id>`, `/events`
+## 사내 업무 skill 추가
+`nixie/skills/hynix-work.yaml`에 skill을 추가합니다. 코드 수정은 필요 없습니다.
+```yaml
+- id: room.book
+  title: 회의실 예약
+  params: {room_id: "...", date: "YYYY-MM-DD", start: "HH:MM", end: "HH:MM", title: "text"}
+  confirm: true                     # 소유자 승인 후 실행
+  strategies:                       # 항상 api -> cli -> browser 순서로 시도
+    - {type: api, service: room, method: POST, path: /v1/reservations, body: {room_id: "{room_id}"}}
+    - {type: cli, argv: [hynix-room, book, "{room_id}"]}
+```
+**주의:** 현재 YAML의 서비스 경로, CLI 이름, 포털 selector는 자리 표시자입니다. 실제 사내 시스템 값으로 바꿔야 합니다.
 
 ## 테스트
 ```bash
-pytest -q   # 실제 서버 3개(alice, bob, carol)와 가짜 LLM 서버로 E2E 검증
+pip install -e ".[test]"
+pytest -q        # 23건. Chrome이 없으면 브라우저 테스트는 skip, nixie:latest 이미지가 없으면 컨테이너 테스트는 skip
 ```
-검증 항목: Agent Card 제공, 승인 기반 일정 확정과 양쪽 캘린더 반영, 예약된 슬롯 회피, 공개 범위 준수, 미등록/무권한 Agent 거부, 소유자 토큰 검사, LLM tool calling, 명령 모드.
 
-## 제한 사항 (MVP)
-- peer 인증은 공유 토큰입니다. 운영에서는 mTLS 또는 사내 SSO(OAuth2) 토큰으로 바꿉니다.
-- 캘린더는 설정 파일과 SQLite입니다. Outlook/Exchange 연동은 아직 없습니다.
-- Agent 탐색(디렉터리)은 없습니다. peer URL을 설정 파일에 직접 적습니다.
-- 외부 서비스 대행(결제, 예매, 전화)은 없습니다.
+## 제한 사항
+- Kata, Firecracker runtime은 이 저장소의 테스트 환경에 KVM이 없어서 실행 검증을 하지 않았습니다. 같은 코드 경로를 runc로 검증했습니다.
+- `Dockerfile.browser`, `Dockerfile.gateway`는 빌드 검증을 하지 않았습니다. 브라우저 풀은 로컬 Chrome으로 검증했습니다.
+- 게이트웨이 컨테이너에 Docker socket을 마운트하면 호스트 권한이 커집니다. 운영에서는 containerd API 권한을 분리하거나 Kubernetes(RuntimeClass: kata/firecracker) 구성으로 바꿉니다.
+- 서비스 토큰(`HYNIX_*`)은 게이트웨이 환경 변수로 모든 샌드박스에 전달됩니다. 운영에서는 사용자별 토큰(SSO 위임)을 사용자 디스크 또는 secret store에 둡니다.
+- peer 인증은 공유 토큰입니다. 운영에서는 mTLS 또는 사내 SSO(OAuth2)로 바꿉니다.
+- 메신저 채널, 그룹 채팅, 메일 연동, 선제 알림은 아직 없습니다.

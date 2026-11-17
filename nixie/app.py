@@ -74,8 +74,7 @@ class NixieExecutor(AgentExecutor):
         await up.complete()
 
 
-def agent_card(agent: NixieAgent) -> AgentCard:
-    cfg = agent.cfg
+def agent_card(cfg) -> AgentCard:
     return AgentCard(
         name=f"Nixie agent of {cfg.owner_name}",
         description="Personal agent. Accepts requests only from trusted peer agents.",
@@ -122,7 +121,7 @@ class MemoryIn(BaseModel):
 
 def create_app(agent: NixieAgent) -> FastAPI:
     app = FastAPI(title=f"Nixie ({agent.cfg.agent_id})")
-    card = agent_card(agent)
+    card = agent_card(agent.cfg)
     handler = DefaultRequestHandler(agent_executor=NixieExecutor(agent), task_store=InMemoryTaskStore(), agent_card=card)
     add_a2a_routes_to_fastapi(
         app,
@@ -140,7 +139,12 @@ def create_app(agent: NixieAgent) -> FastAPI:
     @app.get("/owner/status", dependencies=[Depends(owner)])
     async def status() -> dict[str, Any]:
         return {"agent_id": agent.cfg.agent_id, "owner": agent.cfg.owner_name, "llm": agent.llm.enabled,
-                "peers": sorted(agent.cfg.peers)}
+                "model_tiers": agent.llm.available(), "model_usage": agent.llm.usage,
+                "peers": sorted(agent.cfg.peers), "skills": len(agent.tasks.skills)}
+
+    @app.get("/owner/skills", dependencies=[Depends(owner)])
+    async def skills() -> list[dict[str, Any]]:
+        return agent.tasks.catalog()
 
     @app.post("/owner/chat", dependencies=[Depends(owner)])
     async def chat(body: ChatIn) -> dict[str, str]:

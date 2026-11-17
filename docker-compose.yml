@@ -1,18 +1,28 @@
-# Two agents on one host for MVP validation. Copy examples/.env.example to .env first.
+# Production-like layout:
+#   gateway       always on; starts nixie-u-<user> agent containers on demand, stops them when idle
+#   browser-pool  always on; the only place Chromium runs; leased per job
+#   agents        NOT listed here; the gateway creates them (image nixie:latest)
+# NIXIE_USERS_ROOT must be the same absolute path on the host and in the gateway,
+# because the gateway passes it to `docker run -v`.
+# To use Kata or Firecracker, add e.g. --runtime io.containerd.kata.v2 to the gateway command.
 services:
-  alice:
-    build: .
+  gateway:
+    build: {context: ., dockerfile: Dockerfile.gateway}
     env_file: .env
-    command: ["/app/config.yaml"]
+    command: ["--users-root", "${NIXIE_USERS_ROOT}", "--backend", "container", "--image", "nixie:latest",
+              "--network", "nixie", "--idle-seconds", "300", "--max-running", "50"]
     volumes:
-      - ./examples/alice.docker.yaml:/app/config.yaml:ro
-      - ./data:/app/data
-    ports: ["8701:8701"]
-  bob:
-    build: .
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${NIXIE_USERS_ROOT}:${NIXIE_USERS_ROOT}
+    ports: ["8080:8080"]
+    networks: [nixie]
+  browser-pool:
+    build: {context: ., dockerfile: Dockerfile.browser}
     env_file: .env
-    command: ["/app/config.yaml"]
+    command: ["--size", "4", "--allow-domain", "skhynix.com"]
     volumes:
-      - ./examples/bob.docker.yaml:/app/config.yaml:ro
-      - ./data:/app/data
-    ports: ["8702:8702"]
+      - ${NIXIE_USERS_ROOT}:/users
+    networks: [nixie]
+networks:
+  nixie:
+    name: nixie

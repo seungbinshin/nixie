@@ -1,0 +1,12 @@
+# Shared browser worker pool (the only place Chromium runs).
+FROM python:3.12-slim
+WORKDIR /app
+COPY certs/ /usr/local/share/ca-certificates/nixie/
+RUN update-ca-certificates >/dev/null 2>&1 || true
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+COPY pyproject.toml ./
+COPY nixie ./nixie
+RUN pip install --no-cache-dir ".[browser]" && playwright install --with-deps chromium && useradd -u 10001 -m nixie
+USER 10001
+EXPOSE 8090
+ENTRYPOINT ["nixie", "browser-pool", "--users-root", "/users"]
