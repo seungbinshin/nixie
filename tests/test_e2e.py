@@ -125,9 +125,9 @@ def test_schedule_with_owner_approval(cluster):
     A, B = cluster["alice"], cluster["bob"]
     r = owner(A, "alice", "POST", "/owner/schedule", {"peer": "bob", "title": "Lunch", "duration_min": 60,
               "window_start": "2026-11-17T09:00", "window_end": "2026-11-17T18:00"})
-    # alice busy 09-11, bob busy 11-13 -> first common hour is 13:00
+    # alice busy 09-11, bob busy 11-13 (KST) -> first common hour is 13:00 KST, stored and sent as UTC
     assert r["status"] == "pending_owner_approval"
-    assert r["start"].startswith("2026-11-17T13:00")
+    assert r["start"] == "2026-11-17T04:00:00Z" and r["end"] == "2026-11-17T05:00:00Z"
     pend = [a for a in owner(B, "bob", "GET", "/owner/approvals") if a["status"] == "pending"]
     assert len(pend) == 1
     d = owner(B, "bob", "POST", f"/owner/approvals/{pend[0]['id']}/approve")
@@ -137,7 +137,7 @@ def test_schedule_with_owner_approval(cluster):
     # second request must skip the booked slot
     r2 = owner(A, "alice", "POST", "/owner/schedule", {"peer": "bob", "title": "Sync", "duration_min": 60,
                "window_start": "2026-11-17T13:00", "window_end": "2026-11-17T18:00"})
-    assert r2["start"].startswith("2026-11-17T14:00")
+    assert r2["start"] == "2026-11-17T05:00:00Z"
 
 
 def test_ask_respects_visibility(cluster):
@@ -165,7 +165,7 @@ def test_owner_token_required(cluster):
 
 def test_llm_tool_calling_chat(cluster):
     reply = owner(cluster["alice"], "alice", "POST", "/owner/chat", {"text": "Book lunch with Bob on Wednesday"})["reply"]
-    assert reply.startswith("done:") and "pending_owner_approval" in reply and "2026-11-18T12:00" in reply
+    assert reply.startswith("done:") and "pending_owner_approval" in reply and "2026-11-18T03:00:00Z" in reply  # 12:00 KST
 
 
 def test_command_mode_without_llm(cluster):

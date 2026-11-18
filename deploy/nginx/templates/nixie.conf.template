@@ -1,0 +1,144 @@
+# Nixie edge proxy. The only entry point for people.
+#   - Static web UI (build of the web repository) from /usr/share/nginx/html
+#   - SSO with oauth2-proxy (auth_request). The identity goes to the gateway in X-Auth-Request-User.
+#   - proxy_set_header REPLACES any X-Auth-Request-User that the client sent; X-Nixie-Proxy-Secret proves to the
+#     gateway that the header came from here. The gateway has no published port.
+#   - /u/<user>/a2a, /ingest, /.well-known, /admin are internal (agents and adapters use the internal network).
+# ${NIXIE_SERVER_NAME} and ${NIXIE_PROXY_SECRET} are filled by the nginx image (envsubst on templates).
+
+upstream nixie_gateway { server gateway:8080; keepalive 16; }
+upstream nixie_oauth2 { server oauth2-proxy:4180; }
+
+server {
+    listen 80;
+    server_name ${NIXIE_SERVER_NAME};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${NIXIE_SERVER_NAME};
+    ssl_certificate     /etc/nginx/tls/tls.crt;
+    ssl_certificate_key /etc/nginx/tls/tls.key;
+    server_tokens off;
+    absolute_redirect off;        # relative Location headers
+    underscores_in_headers off;   # drops X_Auth_Request_User style variants
+    client_max_body_size 1m;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header X-Frame-Options "DENY" always;
+
+    # ---- oauth2-proxy
+    location /oauth2/ {
+        proxy_pass       http://nixie_oauth2;
+        proxy_set_header Host                    $host;
+        proxy_set_header X-Real-IP               $remote_addr;
+        proxy_set_header X-Forwarded-Proto       $scheme;
+        proxy_set_header X-Auth-Request-Redirect $request_uri;
+    }
+    location = /oauth2/auth {
+        internal;
+        proxy_pass       http://nixie_oauth2;
+        proxy_set_header Host             $host;
+        proxy_set_header X-Real-IP        $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Uri  $request_uri;
+        proxy_set_header Content-Length   "";
+        proxy_pass_request_body           off;
+    }
+    # page request without a session -> the IdP, then back to the same URL (deep links survive)
+    location @oauth2_signin {
+        return 302 /oauth2/sign_in?rd=$scheme://$host$request_uri;
+    }
+    # API request without a session -> JSON 401; the web UI goes to the login URL
+    location @sso_required {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 401 '{"detail":"sso_required","login_url":"/oauth2/start"}';
+    }
+
+    # ---- internal only
+    location ~ ^/u/[^/]+/(a2a|ingest)(/|$) { return 404; }
+    location ~ ^/u/[^/]+/\.well-known/ { return 404; }
+    location ^~ /admin/ { return 404; }
+    location = /healthz { return 404; }
+
+    # ---- real-time stream (Server-Sent Events): no buffering, long read
+    location ~ ^/u/[^/]+/owner/stream$ {
+        auth_request /oauth2/auth;
+        error_page 401 = @sso_required;
+        auth_request_set $sso_user $upstream_http_x_auth_request_user;
+        proxy_set_header X-Auth-Request-User  $sso_user;
+        proxy_set_header X-Nixie-Proxy-Secret "${NIXIE_PROXY_SECRET}";
+        proxy_set_header X-Owner-Token        "";
+        proxy_set_header Host                 $host;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_pass http://nixie_gateway;
+    }
+
+    # ---- owner API. Plain prefix (not ^~): the regex locations above (internal paths, stream) must win.
+    location /u/ {
+        auth_request /oauth2/auth;
+        error_page 401 = @sso_required;
+        auth_request_set $sso_user $upstream_http_x_auth_request_user;
+        auth_request_set $auth_cookie $upstream_http_set_cookie;
+        add_header Set-Cookie $auth_cookie;
+        proxy_set_header X-Auth-Request-User  $sso_user;
+        proxy_set_header X-Nixie-Proxy-Secret "${NIXIE_PROXY_SECRET}";
+        proxy_set_header X-Owner-Token        "";
+        proxy_set_header Host                 $host;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;               # agent start + LLM tool loop
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        proxy_pass http://nixie_gateway;
+    }
+    location = /auth/me {
+        auth_request /oauth2/auth;
+        error_page 401 = @sso_required;
+        auth_request_set $sso_user $upstream_http_x_auth_request_user;
+        proxy_set_header X-Auth-Request-User  $sso_user;
+        proxy_set_header X-Nixie-Proxy-Secret "${NIXIE_PROXY_SECRET}";
+        proxy_set_header Host                 $host;
+        proxy_pass http://nixie_gateway;
+    }
+    # logout: the gateway clears nixie_session, then sends the browser to /oauth2/sign_out (proxy session)
+    location = /auth/logout {
+        proxy_set_header X-Auth-Request-User  "";
+        proxy_set_header Host                 $host;
+        proxy_pass http://nixie_gateway;
+    }
+    location ^~ /auth/ { return 404; }   # token-mode endpoints are not public in the SSO deployment
+
+    # ---- static web UI. Assets need no session (manifest and icons are fetched without cookies).
+    root /usr/share/nginx/html;
+    location ^~ /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+    location ~ ^/(manifest\.webmanifest|sw\.js|favicon\.svg|icons/.+)$ {
+        add_header Cache-Control "no-cache" always;
+        try_files $uri =404;
+    }
+    location / {
+        auth_request /oauth2/auth;
+        error_page 401 = @oauth2_signin;
+        auth_request_set $auth_cookie $upstream_http_set_cookie;
+        add_header Set-Cookie $auth_cookie;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" always;
+        add_header Cache-Control "no-cache" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "same-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        try_files $uri /index.html;
+    }
+}

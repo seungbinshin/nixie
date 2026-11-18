@@ -40,5 +40,6 @@ def free_slots(
 
 
 def intersect(a: list[Interval], b: list[Interval]) -> list[Interval]:
-    bset = {(s.isoformat(), e.isoformat()) for s, e in b}
-    return [s for s in a if (s[0].isoformat(), s[1].isoformat()) in bset]
+    """Slots present in both lists. Compares instants, so KST and UTC forms of one slot match."""
+    bset = {(s.timestamp(), e.timestamp()) for s, e in b}
+    return [s for s in a if (s[0].timestamp(), s[1].timestamp()) in bset]

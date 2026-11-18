@@ -1,0 +1,39 @@
+# Pilot plan: 5 users, 5 agent-to-agent rooms. A room has exactly 2 participants (2 agents).
+#   nixie pilot init --plan examples/pilot/plan.yaml --users-root "$NIXIE_USERS_ROOT" --env-file .env
+# Run it again after a change. Existing tokens stay.
+gateway_url: http://gateway:8080          # agents reach each other through the gateway (internal network only)
+timezone: Asia/Seoul                      # storage is UTC (ISO 8601, Z); people see KST
+work_hours: [9, 18]
+scopes: [availability, meeting, profile.trusted]
+
+# sso_user = the value that the SSO proxy sends in X-Auth-Request-User (OIDC claim, e.g. preferred_username).
+users:
+  - {id: user1, name: 사용자1, sso_user: user1}
+  - {id: user2, name: 사용자2, sso_user: user2}
+  - {id: user3, name: 사용자3, sso_user: user3}
+  - {id: user4, name: 사용자4, sso_user: user4}
+  - {id: user5, name: 사용자5, sso_user: user5}
+
+rooms:                                    # 5 rooms, max 2 participants each
+  - [user1, user2]
+  - [user2, user3]
+  - [user3, user4]
+  - [user4, user5]
+  - [user5, user1]
+
+# Same for every user. Secrets stay ${VAR} references (gateway environment or the user's secrets.env).
+defaults:
+  persona: hynix
+  models:
+    fast: {base_url: "${NIXIE_FAST_BASE_URL}", api_key: "${NIXIE_FAST_API_KEY}", model: "${NIXIE_FAST_MODEL}"}
+    pro: {base_url: "${NIXIE_PRO_BASE_URL}", api_key: "${NIXIE_PRO_API_KEY}", model: kimi-k3.1-pro,
+          extra: {reasoning_effort: high}}
+    max_tier: pro
+  services:
+    room:     {base_url: "${HYNIX_ROOM_API}",     token: "${HYNIX_ROOM_TOKEN}"}
+    hr:       {base_url: "${HYNIX_HR_API}",       token: "${HYNIX_HR_TOKEN}"}
+    approval: {base_url: "${HYNIX_APPROVAL_API}", token: "${HYNIX_APPROVAL_TOKEN}"}
+    search:   {base_url: "${HYNIX_SEARCH_API}",   token: "${HYNIX_SEARCH_TOKEN}"}
+    itsm:     {base_url: "${HYNIX_ITSM_API}",     token: "${HYNIX_ITSM_TOKEN}"}
+  tools: {shell_allow: [curl, jq, hynix-room, hynix-search, hynix-it], shell_timeout: 60}
+  browser_pool: {url: "http://browser-pool:8090", token: "${NIXIE_BROWSER_POOL_TOKEN}"}
