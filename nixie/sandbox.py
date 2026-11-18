@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import socket
 import sys
 import time
@@ -39,8 +40,8 @@ def check_user(user: str) -> str:
 class SandboxBackend(Protocol):
     name: str
 
-    async def start(self, user: str, home: Path) -> str:
-        """Start the sandbox for this user. Return its base URL."""
+    async def start(self, user: str, home: Path, env: dict[str, str] | None = None) -> str:
+        """Start the sandbox for this user with extra environment `env`. Return its base URL."""
 
     async def stop(self, user: str) -> None: ...
 
@@ -55,10 +56,14 @@ def _free_port() -> int:
 
 # Environment that a sandbox may receive. Everything else from the gateway environment is dropped.
 PASS_ENV_PREFIXES = ("NIXIE_", "HYNIX_")
+# Gateway secrets. A sandbox must never see them (a sandbox could then act as the gateway or the SSO proxy).
+GATEWAY_ONLY_ENV = {"NIXIE_ADMIN_TOKEN", "NIXIE_SESSION_SECRET", "NIXIE_PROXY_SECRET", "NIXIE_GATEWAY_SECRET"}
+# Per-start secret: the gateway sends it with owner requests; the agent trusts the identity header only with it.
+GATEWAY_SECRET_ENV = "NIXIE_GATEWAY_SECRET"
 
 
 def sandbox_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k.startswith(PASS_ENV_PREFIXES)}
+    env = {k: v for k, v in os.environ.items() if k.startswith(PASS_ENV_PREFIXES) and k not in GATEWAY_ONLY_ENV}
     env.update(extra or {})
     return env
 
@@ -70,9 +75,10 @@ class ProcessBackend:
         self.python = python
         self.procs: dict[str, asyncio.subprocess.Process] = {}
 
-    async def start(self, user: str, home: Path) -> str:
+    async def start(self, user: str, home: Path, env: dict[str, str] | None = None) -> str:
         port = _free_port()
-        env = {"PATH": os.environ.get("PATH", ""), **sandbox_env({"NIXIE_USER": user, "NIXIE_HOME": str(home)})}
+        env = {"PATH": os.environ.get("PATH", ""),
+               **sandbox_env({"NIXIE_USER": user, "NIXIE_HOME": str(home), **(env or {})})}
         if "PYTHONPATH" in os.environ:
             env["PYTHONPATH"] = os.environ["PYTHONPATH"]
         log_file = open(home / "sandbox.log", "ab")  # noqa: SIM115 - kept open for the child
@@ -114,17 +120,18 @@ class ContainerBackend:
     def _cname(self, user: str) -> str:
         return f"nixie-u-{user}"
 
-    async def _run(self, *args: str, check: bool = True) -> str:
+    async def _run(self, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
         proc = await asyncio.create_subprocess_exec(
             self.cli, *self.cli_global_args, *args,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **env} if env else None,
         )
         out, err = await proc.communicate()
         if check and proc.returncode != 0:
             raise RuntimeError(f"{self.cli} {' '.join(args[:2])} failed: {err.decode().strip()}")
         return out.decode().strip()
 
-    async def start(self, user: str, home: Path) -> str:
+    async def start(self, user: str, home: Path, env: dict[str, str] | None = None) -> str:
         name = self._cname(user)
         await self._run("rm", "-f", name, check=False)
         args = ["run", "-d", "--rm", "--name", name, "--cpus", self.cpus, "--memory", self.memory,
@@ -132,6 +139,8 @@ class ContainerBackend:
                 "-v", f"{home}:{self.mount_point}", "-e", f"NIXIE_USER={user}", "-e", f"NIXIE_HOME={self.mount_point}"]
         for k, v in sandbox_env().items():
             args += ["-e", f"{k}={v}"]
+        for k in env or {}:
+            args += ["-e", k]  # value comes from the CLI process environment, so it is not on the command line
         if self.run_as_disk_owner:
             st = home.stat()
             args += ["--user", f"{st.st_uid}:{st.st_gid}"]
@@ -142,7 +151,7 @@ class ContainerBackend:
         else:
             args += ["-p", "127.0.0.1::8700"]
         args += [self.image, f"{self.mount_point}/agent.yaml", "--host", "0.0.0.0", "--port", "8700"]
-        await self._run(*args)
+        await self._run(*args, env=env)
         if self.network:
             return f"http://{name}:8700"
         port = (await self._run("port", name, "8700/tcp")).splitlines()[0].rsplit(":", 1)[1]
@@ -162,6 +171,7 @@ class SandboxState:
     started: float
     last_used: float
     in_flight: int = 0
+    secret: str = ""  # gateway secret of this start (see GATEWAY_SECRET_ENV)
 
 
 class SandboxManager:
@@ -197,10 +207,11 @@ class SandboxManager:
             await self._make_room()
             for d in ("data", "workspace", "browser"):
                 (home / d).mkdir(exist_ok=True)
-            url = await self.backend.start(user, home)
+            secret = secrets.token_urlsafe(32)
+            url = await self.backend.start(user, home, {GATEWAY_SECRET_ENV: secret})
             await self._wait_ready(user, url)
             now = time.monotonic()
-            self.running[user] = SandboxState(url=url, started=now, last_used=now)
+            self.running[user] = SandboxState(url=url, started=now, last_used=now, secret=secret)
             self.starts[user] = self.starts.get(user, 0) + 1
             log.info("sandbox up: %s (%s) at %s", user, self.backend.name, url)
             return url

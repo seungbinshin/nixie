@@ -1,28 +1,56 @@
-# Production-like layout:
-#   gateway       always on; starts nixie-u-<user> agent containers on demand, stops them when idle
-#   browser-pool  always on; the only place Chromium runs; leased per job
-#   agents        NOT listed here; the gateway creates them (image nixie:latest)
+# Pilot layout (5 users). Only `proxy` has a published port.
+#
+#   person ──HTTPS──▶ proxy (nginx) ──auth_request──▶ oauth2-proxy ──▶ corporate IdP (OIDC)
+#                       │  static web UI (web/dist)
+#                       └─ /u/<user>/owner, /auth ──▶ gateway:8080 (core network, no published port)
+#   gateway ──start/stop──▶ nixie-u-<user> agent containers (nixie network) ──A2A──▶ gateway:8080/u/<peer>/a2a
+#   browser-pool: the only place Chromium runs
+#
 # NIXIE_USERS_ROOT must be the same absolute path on the host and in the gateway,
 # because the gateway passes it to `docker run -v`.
 # To use Kata or Firecracker, add e.g. --runtime io.containerd.kata.v2 to the gateway command.
 services:
+  proxy:
+    image: nginx:1.29-alpine
+    depends_on: [gateway, oauth2-proxy]
+    environment:
+      NIXIE_SERVER_NAME: ${NIXIE_SERVER_NAME}
+      NIXIE_PROXY_SECRET: ${NIXIE_PROXY_SECRET}
+    volumes:
+      - ./deploy/nginx/templates:/etc/nginx/templates:ro
+      - ./deploy/tls:/etc/nginx/tls:ro
+      - ${NIXIE_WEB_DIST:-./web/dist}:/usr/share/nginx/html:ro   # static build of the web UI
+    ports: ["443:443", "80:80"]
+    networks: [edge, core]
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6
+    command: ["--config=/etc/oauth2-proxy.cfg"]
+    env_file: .env          # OAUTH2_PROXY_* values
+    volumes:
+      - ./deploy/oauth2-proxy/oauth2-proxy.cfg:/etc/oauth2-proxy.cfg:ro
+    networks: [edge]
   gateway:
     build: {context: ., dockerfile: Dockerfile.gateway}
     env_file: .env
+    environment:
+      NIXIE_AUTH_MODE: sso
     command: ["--users-root", "${NIXIE_USERS_ROOT}", "--backend", "container", "--image", "nixie:latest",
-              "--network", "nixie", "--idle-seconds", "300", "--max-running", "50"]
+              "--network", "nixie", "--idle-seconds", "300", "--max-running", "5",
+              "--logout-url", "${NIXIE_LOGOUT_URL:-/oauth2/sign_out?rd=%2F}"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${NIXIE_USERS_ROOT}:${NIXIE_USERS_ROOT}
-    ports: ["8080:8080"]
-    networks: [nixie]
+    networks: [core, nixie]
   browser-pool:
     build: {context: ., dockerfile: Dockerfile.browser}
     env_file: .env
-    command: ["--size", "4", "--allow-domain", "skhynix.com"]
+    command: ["--size", "2", "--allow-domain", "skhynix.com"]
     volumes:
       - ${NIXIE_USERS_ROOT}:/users
     networks: [nixie]
 networks:
+  edge:
+    ipam: {config: [{subnet: 172.30.10.0/24}]}   # oauth2-proxy trusts X-Forwarded-* only from here
+  core: {}
   nixie:
     name: nixie

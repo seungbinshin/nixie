@@ -1,12 +1,21 @@
-"""HTTP app: A2A endpoints (agent-to-agent) + owner API + minimal web chat."""
+"""HTTP app of one agent sandbox.
+
+Three entry paths, each with its own authentication:
+- /a2a/...    agent-to-agent (A2A JSON-RPC). Peer token in the message metadata.
+- /owner/...  the owner (a person). Either the gateway's identity header (X-Auth-Request-User, trusted only
+              with this sandbox's gateway secret) or the owner token (X-Owner-Token, development and CLI).
+- /ingest/... in-house collection adapters (mail, approval system). Service token X-Ingest-Token.
+The web UI is a separate static build; this app serves no HTML.
+"""
 
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel
 
@@ -24,7 +33,7 @@ from a2a.types import (
 from google.protobuf import struct_pb2
 from google.protobuf.json_format import ParseDict
 
-from .agent import NixieAgent
+from .agent import ConflictError, NixieAgent
 from .peer import PeerError
 from .policy import PolicyError
 
@@ -119,6 +128,27 @@ class MemoryIn(BaseModel):
     visibility: str = "private"
 
 
+class ReadIn(BaseModel):
+    upto: int | None = None
+
+
+class IngestItem(BaseModel):
+    title: str
+    body: str = ""
+    kind: str = "external"
+    source: str = "external"
+    source_url: str | None = None
+    external_id: str | None = None
+
+
+class IngestIn(BaseModel):
+    items: list[IngestItem]
+
+
+def _same(a: str, b: str) -> bool:
+    return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
+
+
 def create_app(agent: NixieAgent) -> FastAPI:
     app = FastAPI(title=f"Nixie ({agent.cfg.agent_id})")
     card = agent_card(agent.cfg)
@@ -129,9 +159,33 @@ def create_app(agent: NixieAgent) -> FastAPI:
         jsonrpc_routes=create_jsonrpc_routes(request_handler=handler, rpc_url="/a2a/jsonrpc"),
     )
 
-    def owner(x_owner_token: str = Header(default="")) -> None:
-        if x_owner_token != agent.cfg.owner_token:
-            raise HTTPException(401, "bad owner token")
+    gateway_secret = os.environ.get("NIXIE_GATEWAY_SECRET", "")  # unique per sandbox start, known only to the gateway
+
+    def owner(x_owner_token: str = Header(default=""), x_nixie_gateway: str = Header(default=""),
+              x_auth_request_user: str = Header(default="")) -> None:
+        # 1. Gateway path: the gateway authenticated the person (SSO proxy or session) and says who it is.
+        #    The header is trusted only together with this sandbox's gateway secret, so other sandboxes
+        #    on the same network cannot forge it.
+        if _same(x_nixie_gateway, gateway_secret):
+            if _same(x_auth_request_user, agent.cfg.sso_user):
+                return
+            raise HTTPException(403, "identity does not own this agent")
+        # 2. Owner token (development, CLI). An empty configured token never matches.
+        if _same(x_owner_token, agent.cfg.owner_token):
+            return
+        raise HTTPException(401, "owner authentication required")
+
+    def ingest_auth(x_ingest_token: str = Header(default="")) -> None:
+        if not _same(x_ingest_token, agent.cfg.ingest_token):
+            raise HTTPException(401, "bad ingest token")
+
+    @app.middleware("http")
+    async def no_store(request: Request, call_next):
+        resp = await call_next(request)
+        if request.url.path.startswith(("/owner", "/ingest")):
+            resp.headers["Cache-Control"] = "no-store"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        return resp
 
     def wrap_peer_error(e: Exception) -> HTTPException:
         return HTTPException(502, str(e))
@@ -142,13 +196,26 @@ def create_app(agent: NixieAgent) -> FastAPI:
                 "model_tiers": agent.llm.available(), "model_usage": agent.llm.usage,
                 "peers": sorted(agent.cfg.peers), "skills": len(agent.tasks.skills)}
 
+    @app.get("/owner/me", dependencies=[Depends(owner)])
+    async def me() -> dict[str, Any]:
+        return {"agent_id": agent.cfg.agent_id, "owner_name": agent.cfg.owner_name, "sso_user": agent.cfg.sso_user,
+                "timezone": agent.cfg.timezone, "llm": agent.llm.enabled,
+                "peers": [{"id": p.name, "name": p.label, "room_id": agent.room_id(p.name)}
+                          for p in sorted(agent.cfg.peers.values(), key=lambda p: p.name)]}
+
     @app.get("/owner/skills", dependencies=[Depends(owner)])
     async def skills() -> list[dict[str, Any]]:
         return agent.tasks.catalog()
 
     @app.post("/owner/chat", dependencies=[Depends(owner)])
     async def chat(body: ChatIn) -> dict[str, str]:
+        if not body.text.strip():
+            raise HTTPException(400, "empty message")
         return {"reply": await agent.owner_chat(body.text)}
+
+    @app.get("/owner/chat", dependencies=[Depends(owner)])
+    async def chat_history(limit: int = 200) -> dict[str, Any]:
+        return {"messages": agent.store.chat_history(min(max(limit, 1), 500))}
 
     @app.post("/owner/schedule", dependencies=[Depends(owner)])
     async def schedule(body: ScheduleIn) -> dict[str, Any]:
@@ -177,17 +244,66 @@ def create_app(agent: NixieAgent) -> FastAPI:
         return agent.store.events()
 
     @app.get("/owner/approvals", dependencies=[Depends(owner)])
-    async def approvals() -> list[dict[str, Any]]:
-        return agent.store.approvals()
+    async def approvals(status: str | None = None) -> list[dict[str, Any]]:
+        if status == "pending":
+            return agent.pending_approvals()  # what the owner must decide, with a readable summary
+        return agent.store.approvals(status)
 
     @app.post("/owner/approvals/{aid}/{decision}", dependencies=[Depends(owner)])
     async def decide(aid: str, decision: str) -> dict[str, Any]:
+        """Idempotent: a second click with the same decision runs nothing and returns the first result."""
         if decision not in ("approve", "decline"):
             raise HTTPException(400, "decision must be approve or decline")
         try:
-            return await agent.decide(aid, decision == "approve")
+            res = await agent.decide(aid, decision == "approve")
+        except ConflictError as e:
+            raise HTTPException(409, str(e)) from e
         except PeerError as e:
             raise wrap_peer_error(e) from e
+        if res.get("status") == "not_found":
+            raise HTTPException(404, "no such approval")
+        return res
+
+    # Rooms: one per agent pair (max 2 participants). Owners read; they cannot write lines.
+    @app.get("/owner/rooms", dependencies=[Depends(owner)])
+    async def rooms() -> list[dict[str, Any]]:
+        return agent.rooms()
+
+    @app.get("/owner/rooms/{room_id}", dependencies=[Depends(owner)])
+    async def room(room_id: str) -> dict[str, Any]:
+        try:
+            return agent.room(room_id)
+        except KeyError as e:
+            raise HTTPException(404, "no such room") from e
+
+    @app.post("/owner/rooms/{room_id}/read", dependencies=[Depends(owner)])
+    async def room_read(room_id: str, body: ReadIn | None = None) -> dict[str, Any]:
+        """Move the owner's read marker. This does not write into the conversation."""
+        try:
+            return agent.mark_room_read(room_id, body.upto if body else None)
+        except KeyError as e:
+            raise HTTPException(404, "no such room") from e
+
+    @app.get("/owner/notifications", dependencies=[Depends(owner)])
+    async def notifications(unread: bool = False, limit: int = 100) -> dict[str, Any]:
+        return {"items": agent.store.notifications(unread, min(max(limit, 1), 500)),
+                "unread": agent.store.unread_notifications()}
+
+    @app.post("/owner/notifications/read-all", dependencies=[Depends(owner)])
+    async def notifications_read_all() -> dict[str, int]:
+        return {"marked": agent.store.mark_all_notifications_read()}
+
+    @app.post("/owner/notifications/{nid}/read", dependencies=[Depends(owner)])
+    async def notification_read(nid: str) -> dict[str, bool]:
+        return {"marked": agent.store.mark_notification_read(nid)}
+
+    @app.post("/ingest/notifications", dependencies=[Depends(ingest_auth)])
+    async def ingest(body: IngestIn) -> dict[str, Any]:
+        """Entry point for in-house collection adapters (implemented in-house; mail from mailbrief)."""
+        try:
+            return {"results": agent.ingest([i.model_dump() for i in body.items])}
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
     # Agent-to-agent conversations: owners can READ only. There is no endpoint to post, edit or delete lines.
     @app.get("/owner/conversations", dependencies=[Depends(owner)])
@@ -200,6 +316,7 @@ def create_app(agent: NixieAgent) -> FastAPI:
         if not lines:
             raise HTTPException(404, "no such conversation")
         return {"conversation_id": conv_id, "read_only": True, "integrity_ok": agent.store.verify_transcript(),
+                "room_id": agent.room_id(lines[0]["peer"]),
                 "lines": [{"ts": l["ts"], "speaker": l["speaker"], "text": l["text"], "intent": l["intent"],
                            "data": l["data"], "hash": l["hash"]} for l in lines]}
 
@@ -207,30 +324,4 @@ def create_app(agent: NixieAgent) -> FastAPI:
     async def audit() -> list[dict[str, Any]]:
         return agent.store.audit_log()
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index() -> str:
-        return INDEX_HTML.replace("{{AGENT}}", agent.cfg.owner_name)
-
     return app
-
-
-INDEX_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>Nixie</title>
-<style>body{font:15px system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 12px}
-#log{border:1px solid #ccc;border-radius:8px;height:60vh;overflow:auto;padding:10px;white-space:pre-wrap}
-.me{color:#1a4fd8}.ai{color:#222}input{padding:8px}#t{width:100%;box-sizing:border-box;margin-top:8px}</style></head>
-<body><h3>Nixie - agent of {{AGENT}}</h3>
-<input id="k" type="password" placeholder="owner token"> <button onclick="ap()">approvals</button>
-<button onclick="cv()">agent conversations (read-only)</button>
-<div id="log"></div><input id="t" placeholder="message or /help" onkeydown="if(event.key==='Enter')send()">
-<script>
-const L=document.getElementById('log');
-function add(c,s){const d=document.createElement('div');d.className=c;d.textContent=s;L.appendChild(d);L.scrollTop=1e9}
-async function call(p,b){const r=await fetch(p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json',
-'X-Owner-Token':document.getElementById('k').value},body:b?JSON.stringify(b):undefined});return r.json()}
-async function send(){const t=document.getElementById('t');const v=t.value;if(!v)return;t.value='';add('me','> '+v);
-try{const j=await call('/owner/chat',{text:v});add('ai',j.reply??JSON.stringify(j))}catch(e){add('ai','error: '+e)}}
-async function ap(){add('ai',JSON.stringify(await call('/owner/approvals'),null,1))}
-async function cv(){const list=await call('/owner/conversations');for(const c of list){
-const t=await call('/owner/conversations/'+c.conv_id);add('ai','--- conversation '+c.conv_id+' with '+c.peer+
-' (read-only, integrity '+(t.integrity_ok?'OK':'FAILED')+')');for(const l of t.lines)add('ai','['+l.ts.slice(11,19)+'] '+l.speaker+': '+l.text)}}
-</script></body></html>"""

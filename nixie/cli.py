@@ -30,6 +30,25 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--network")
     g.add_argument("--idle-seconds", type=float, default=300)
     g.add_argument("--max-running", type=int)
+    g.add_argument("--auth", choices=["token", "sso", "both"], default=os.environ.get("NIXIE_AUTH_MODE", "token"),
+                   help="token: owner token / nixie_session (before SSO); sso: SSO proxy header only; both: transition")
+    g.add_argument("--web-root", help="serve the static web UI build from this directory (dev; prod: the proxy)")
+    g.add_argument("--login-url", default="/oauth2/start", help="SSO sign-in start URL for the web UI")
+    g.add_argument("--logout-url", default="/oauth2/sign_out?rd=%2F", help="SSO proxy sign-out URL")
+    g.add_argument("--session-ttl", type=int, default=8 * 3600)
+    g.add_argument("--insecure-cookie", action="store_true", help="allow the session cookie over plain HTTP (dev)")
+    pl = sub.add_parser("pilot", help="pilot provisioning")
+    plsub = pl.add_subparsers(dest="pilot_cmd", required=True)
+    pi = plsub.add_parser("init", help="write agent.yaml + secrets.env for each user and room in the plan")
+    pi.add_argument("--plan", required=True)
+    pi.add_argument("--users-root", required=True)
+    pi.add_argument("--env-file", help="add missing gateway/proxy secrets to this deploy env file")
+    pi.add_argument("--gateway-url", help="override gateway_url of the plan (e.g. http://127.0.0.1:8080 for dev)")
+    ll = sub.add_parser("login-link", help="one-time sign-in URL (token/both modes, before SSO)")
+    ll.add_argument("--users-root", required=True)
+    ll.add_argument("--user", required=True)
+    ll.add_argument("--base", default="")
+    ll.add_argument("--ttl", type=int, default=600)
     b = sub.add_parser("browser-pool", help="shared browser worker pool")
     b.add_argument("--users-root", required=True)
     b.add_argument("--host", default="0.0.0.0")
@@ -56,7 +75,7 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "gateway":
         import uvicorn
 
-        from .gateway import create_gateway
+        from .gateway import GatewaySettings, create_gateway
         from .sandbox import ContainerBackend, ProcessBackend, SandboxManager
 
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -66,8 +85,25 @@ def main(argv: list[str] | None = None) -> None:
             backend = ContainerBackend(image=a.image, cli=a.cli, cli_global_args=a.cli_arg, runtime=a.runtime,
                                        network=a.network)
         mgr = SandboxManager(backend, a.users_root, idle_seconds=a.idle_seconds, max_running=a.max_running)
-        uvicorn.run(create_gateway(mgr, admin_token=os.environ.get("NIXIE_ADMIN_TOKEN", "")),
-                    host=a.host, port=a.port)
+        settings = GatewaySettings.from_env(
+            auth_mode=a.auth, web_root=a.web_root, login_url=a.login_url, logout_url=a.logout_url,
+            session_ttl=a.session_ttl, cookie_secure=not a.insecure_cookie)
+        uvicorn.run(create_gateway(mgr, settings=settings), host=a.host, port=a.port)
+    elif a.cmd == "pilot":
+        from .pilot import ensure_gateway_env, provision
+
+        out = provision(a.plan, a.users_root, a.gateway_url)
+        if a.env_file:
+            out["gateway_env_added"] = ensure_gateway_env(a.env_file)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    elif a.cmd == "login-link":
+        from .gateway import make_login_link
+
+        secret = os.environ.get("NIXIE_SESSION_SECRET")
+        if not secret:
+            print("NIXIE_SESSION_SECRET must be the gateway's value", file=sys.stderr)
+            sys.exit(2)
+        print(make_login_link(a.users_root, a.user, secret.encode(), a.base, a.ttl))
     elif a.cmd == "browser-pool":
         import uvicorn
 

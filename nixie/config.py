@@ -18,6 +18,11 @@ class Peer:
     url: str
     token: str  # shared secret for this agent pair
     scopes: list[str] = field(default_factory=list)  # availability, profile.trusted, meeting.auto_accept
+    display_name: str = ""  # name of the peer's owner, shown in the room list
+
+    @property
+    def label(self) -> str:
+        return self.display_name or self.name.capitalize()
 
 
 @dataclass
@@ -87,6 +92,8 @@ class AgentConfig:
     browser_pool_token: str | None = None
     skills_file: Path | None = None
     persona: str = "hynix"
+    sso_user: str = ""  # identity from the SSO proxy (X-Auth-Request-User) that owns this agent
+    ingest_token: str = ""  # service token for in-house collection adapters (mail, approvals, ...)
 
     @property
     def workspace(self) -> Path:
@@ -97,15 +104,38 @@ class AgentConfig:
         return ZoneInfo(self.timezone)
 
 
-def _env(value: str | None) -> str | None:
-    """Expand ${VAR} references so secrets stay out of the YAML file."""
+def read_env_file(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines. '#' starts a comment. No shell expansion."""
+    out: dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _expand(value: str | None, secrets: dict[str, str] | None = None) -> str | None:
+    """Expand ${VAR} references so secrets stay out of the YAML file.
+
+    Lookup order: the user's own secrets file (<home>/secrets.env, mounted only into that user's sandbox),
+    then the process environment.
+    """
     if value is None:
         return None
-    out = re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), ""), str(value))
+    out = re.sub(r"\$\{(\w+)\}", lambda m: (secrets or {}).get(m.group(1)) or os.environ.get(m.group(1), ""), str(value))
     return out or None
 
 
 def load_config(path: str | Path) -> AgentConfig:
+    secrets = read_env_file(Path(path).resolve().parent / "secrets.env")
+
+    def _env(value: str | None) -> str | None:  # noqa: F811 - same rule, with this user's secrets
+        return _expand(value, secrets)
+
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     tzname = raw.get("timezone", "Asia/Seoul")
     tz = ZoneInfo(tzname)
@@ -117,7 +147,8 @@ def load_config(path: str | Path) -> AgentConfig:
     busy = [(parse_dt(b["start"]), parse_dt(b["end"])) for b in raw.get("busy", [])]
     facts = [Fact(text=f["text"], visibility=f.get("visibility", "private")) for f in raw.get("facts", [])]
     peers = {
-        name: Peer(name=name, url=p["url"].rstrip("/"), token=_env(p["token"]) or "", scopes=list(p.get("scopes", [])))
+        name: Peer(name=name, url=_env(p["url"]).rstrip("/"), token=_env(p["token"]) or "",
+                   scopes=list(p.get("scopes", [])), display_name=str(p.get("display_name") or ""))
         for name, p in (raw.get("peers") or {}).items()
     }
     llm_raw = raw.get("llm") or {}
@@ -173,7 +204,7 @@ def load_config(path: str | Path) -> AgentConfig:
         host=host,
         port=port,
         public_url=(_env(raw.get("public_url")) or f"http://{host}:{port}").rstrip("/"),
-        owner_token=_env(raw["owner_token"]) or "",
+        owner_token=_env(raw.get("owner_token")) or "",
         timezone=tzname,
         work_hours=(int(wh[0]), int(wh[1])),
         busy=busy,
@@ -190,4 +221,6 @@ def load_config(path: str | Path) -> AgentConfig:
         browser_pool_token=_env(bp.get("token")) or os.environ.get("NIXIE_BROWSER_POOL_TOKEN") or None,
         skills_file=skills_file,
         persona=raw.get("persona", "hynix"),
+        sso_user=_env(raw.get("sso_user")) or raw["agent_id"],
+        ingest_token=_env(raw.get("ingest_token")) or "",
     )

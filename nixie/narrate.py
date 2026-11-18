@@ -2,21 +2,19 @@
 
 Each A2A message carries one line of plain text (for people) and one JSON data part (for machines).
 The text is built from the same data, so the transcript always matches what the agents did.
+Times in the data are UTC (ISO 8601, Z). Times in the text are KST.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
-
-def _hm(iso: str) -> str:
-    d = datetime.fromisoformat(iso)
-    return d.strftime("%m/%d %H:%M")
+from .timeutil import kst
 
 
 def _range(start: str, end: str) -> str:
-    return f"{_hm(start)}–{datetime.fromisoformat(end).strftime('%H:%M')}"
+    """Times on the wire are UTC. People read KST."""
+    return f"{kst(start)}–{kst(end, '%H:%M')} KST"
 
 
 def request(intent: str, data: dict[str, Any], owner: str) -> str:

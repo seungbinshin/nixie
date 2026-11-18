@@ -1,7 +1,11 @@
-# User disk: <users_root>/alice/agent.yaml (+ data/, workspace/, browser/ created on first start)
+# User disk: <users_root>/alice/agent.yaml + secrets.env (+ data/, workspace/, browser/ created on first start)
+# ${OWNER_TOKEN}, ${INGEST_TOKEN}, ${PEER_TOKEN_BOB} come from secrets.env (copy secrets.env.example).
+# secrets.env is mounted only into this user's sandbox. For 5 users use `nixie pilot init` instead.
 agent_id: alice
 owner_name: Alice
-owner_token: ${ALICE_OWNER_TOKEN}
+owner_token: ${OWNER_TOKEN}
+ingest_token: ${INGEST_TOKEN}
+sso_user: alice                                  # X-Auth-Request-User from the SSO proxy
 public_url: http://gateway:8080/u/alice        # peers reach this agent through the gateway
 timezone: Asia/Seoul
 work_hours: [9, 18]
@@ -11,7 +15,8 @@ facts:
 peers:
   bob:
     url: http://gateway:8080/u/bob
-    token: ${AB_PEER_TOKEN}
+    token: ${PEER_TOKEN_BOB}
+    display_name: Bob
     scopes: [availability, meeting, profile.trusted]
 
 # Models: light model by default, in-house high-performance model only when needed.

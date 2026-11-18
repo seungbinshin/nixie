@@ -58,14 +58,15 @@ def test_wake_on_request_stop_when_idle_disk_persists(tmp_path):
         d = post(f"{gw}/u/bob/owner/approvals/{pend[0]['id']}/approve", headers={"X-Owner-Token": "bob-owner"}).json()
         assert d["status"] == "approved"
         ev = get(f"{gw}/u/alice/owner/events", headers={"X-Owner-Token": "alice-owner"}).json()
-        assert len(ev) == 1 and ev[0]["start"].startswith("2026-11-17T13:00")
+        assert len(ev) == 1 and ev[0]["start"] == "2026-11-17T04:00:00Z"
         conv = get(f"{gw}/u/alice/owner/conversations/{r.json()['conversation_id']}",
                    headers={"X-Owner-Token": "alice-owner"}).json()
         assert len(conv["lines"]) == 6 and conv["integrity_ok"]
 
         # only disk remains between requests
         assert (tmp_path / "alice" / "data" / "nixie.db").is_file()
-        assert get(f"{gw}/u/nobody/owner/status").status_code == 404
+        assert get(f"{gw}/u/nobody/owner/status").status_code == 401  # no user enumeration without credentials
+        assert get(f"{gw}/u/nobody/owner/status", headers={"X-Owner-Token": "x"}).status_code == 404
         assert get(f"{gw}/u/..%2Fetc/owner/status").status_code == 404
 
 

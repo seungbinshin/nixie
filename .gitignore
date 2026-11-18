@@ -5,3 +5,10 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 certs/*.crt
+
+# deploy secrets
+deploy/tls/*.crt
+deploy/tls/*.key
+secrets.env
+web/node_modules/
+web/dist/
