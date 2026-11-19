@@ -1,5 +1,7 @@
-import { useEffect, useRef } from "react";
+import { Fragment, useEffect, useRef } from "react";
+import { Avatar } from "../characters";
 import type { RoomDetail } from "../types";
+import { Markdown } from "./Markdown";
 import { kstDay, kstFull, kstTime } from "../time";
 
 interface Props {
@@ -7,10 +9,11 @@ interface Props {
   error: string | null;
   me: string;
   onGoChat(): void;
+  onNavigate(href: string): void;
 }
 
 /** Agent-to-agent conversation. Owners read it; there is no input here. */
-export function RoomView({ room, error, me, onGoChat }: Props) {
+export function RoomView({ room, error, me, onGoChat, onNavigate }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" }); // block body: newer browsers return a Promise here
@@ -45,20 +48,26 @@ export function RoomView({ room, error, me, onGoChat }: Props) {
               prevDay = day;
               const mine = l.speaker === me;
               const unread = l.id > room.last_read;
+              const who = room.participants.find((p) => p.id === l.speaker);
+              const agentName = who?.agent_name || "에이전트";
               return (
-                <li key={l.id} className={"msg" + (mine ? " msg--mine" : "")}>
-                  {(newDay || newConv) && (
-                    <p className="sep"><span>{newDay ? day : "새 요청"}</span></p>
-                  )}
+                <Fragment key={l.id}>
+                {(newDay || newConv) && (
+                  <li className="sep"><span>{newDay ? day : "새 요청"}</span></li>
+                )}
+                <li className={"msg" + (mine ? " msg--mine" : "")}>
+                  <Avatar character={who?.character} size={32} fallback={l.speaker_name} />
                   <div className="bubble">
                     <p className="msg-head">
-                      <span className="who">{mine ? `${l.speaker_name}의 에이전트(내 에이전트)` : `${l.speaker_name}의 에이전트`}</span>
+                      <span className="who">{agentName}</span>
+                      <span className="muted">{mine ? "내 에이전트" : `${l.speaker_name}님의 에이전트`}</span>
                       <time dateTime={l.ts} title={kstFull(l.ts)}>{kstTime(l.ts)} KST</time>
                       {unread && <span className="sr-only">(새 메시지)</span>}
                     </p>
-                    <p className="msg-text">{l.text}</p>
+                    <Markdown text={l.text} onNavigate={onNavigate} />
                   </div>
                 </li>
+                </Fragment>
               );
             })}
           </ol>

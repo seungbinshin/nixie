@@ -17,10 +17,11 @@ def _range(start: str, end: str) -> str:
     return f"{kst(start)}–{kst(end, '%H:%M')} KST"
 
 
-def request(intent: str, data: dict[str, Any], owner: str) -> str:
+def request(intent: str, data: dict[str, Any], owner: str, agent_name: str | None = None) -> str:
     if intent == "availability.query":
         title = data.get("title") or "회의"
-        return (f"안녕하세요, {owner}님의 Agent입니다. {owner}님이 '{title}'({int(float(data['duration_min']))}분) 일정을 원합니다. "
+        me = f"{owner}님의 에이전트 {agent_name}입니다" if agent_name else f"{owner}님의 에이전트입니다"
+        return (f"안녕하세요, {me}. {owner}님이 '{title}'({int(float(data['duration_min']))}분) 일정을 원합니다. "
                 f"{_range(data['window_start'], data['window_end'])} 사이에 가능한 시간을 알려 주세요.")
     if intent == "meeting.propose":
         return f"두 분 모두 가능한 {_range(data['start'], data['end'])}에 '{data['title']}'을(를) 제안합니다."

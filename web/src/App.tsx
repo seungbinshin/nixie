@@ -1,15 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, AuthRequired, getMe, goToLogin, isBusy, once, request } from "./api";
-import { AgentChat } from "./components/AgentChat";
+import { AgentChat, type Inflight } from "./components/AgentChat";
+import { Panel, type PanelId } from "./components/Panel";
+import { Settings } from "./components/Settings";
+import { Wiki } from "./components/Wiki";
+import type { CharacterId } from "./characters";
+import { applyTheme, cacheTheme } from "./theme";
 import { Approvals, type DecisionState } from "./components/Approvals";
 import { Inbox } from "./components/Inbox";
 import { RoomList } from "./components/RoomList";
 import { RoomView } from "./components/RoomView";
 import { hrefFor, parseRoute, type Route } from "./route";
 import { openStream, type StreamState } from "./stream";
-import type { Approval, Change, ChatMessage, Me, Notice, RoomDetail, RoomSummary } from "./types";
+import type { Approval, Change, ChatMessage, Me, Notice, Profile, RoomDetail, RoomSummary } from "./types";
 
 type Pane = "rooms" | "main" | "side";
+interface Layout { collapsed: Partial<Record<PanelId, boolean>>; max: PanelId | null }
+const LAYOUT_KEY = "nixie.layout";
+function loadLayout(): Layout {
+  try {
+    const l = JSON.parse(localStorage.getItem(LAYOUT_KEY) || "null");
+    if (l && typeof l === "object" && l.collapsed) return { collapsed: l.collapsed, max: null };
+  } catch {
+    /* private mode */
+  }
+  return { collapsed: {}, max: null };
+}
 type Topic = Change["topic"];
 
 const STREAM_LABEL: Record<StreamState, string> = {
@@ -47,7 +63,11 @@ export function App() {
   const [roomError, setRoomError] = useState<string | null>(null);
   const [chat, setChat] = useState<ChatMessage[] | null>(null);
   const [chatUnread, setChatUnread] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [inflight, setInflight] = useState<Inflight[]>([]);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [wikiVersion, setWikiVersion] = useState(0);
+  const [layout, setLayout] = useState<Layout>(loadLayout);
   const [approvals, setApprovals] = useState<Approval[] | null>(null);
   const [decisions, setDecisions] = useState<Record<string, DecisionState>>({});
   const [notices, setNotices] = useState<Notice[] | null>(null);
@@ -59,8 +79,11 @@ export function App() {
 
   const api = me?.api ?? "";
   const roomId = route.view === "room" ? route.roomId : null;
+  const wikiDoc = route.view === "wiki" ? route.docId : undefined;
   const roomIdRef = useRef(roomId);
   roomIdRef.current = roomId;
+  const viewRef = useRef(route.view);
+  viewRef.current = route.view;
   const knownNotices = useRef<Set<string> | null>(null);
   const focusAfterNav = useRef(false);
 
@@ -163,7 +186,12 @@ export function App() {
 
   // ------------------------------------------------------------ sign-in
   useEffect(() => {
-    getMe().then(setMe).catch((e) => {
+    getMe().then((m) => {
+      setMe(m);
+      setProfile(m.profile);
+      applyTheme(m.profile.theme);
+      cacheTheme(m.profile.theme);
+    }).catch((e) => {
       if (e instanceof AuthRequired) {
         if (!e.loginUrl) setFatal("로그인 세션이 없습니다. 관리자에게 받은 로그인 링크를 여십시오.");
         return; // otherwise the browser is on its way to SSO
@@ -185,11 +213,11 @@ export function App() {
       setRoom(null);
       setRoomError(null);
       void loadRoom(roomId);
-    } else {
+    } else if (route.view === "chat") {
       setChatUnread(false);
       void loadChat();
     }
-  }, [api, roomId, loadRoom, loadChat]);
+  }, [api, roomId, route.view, loadRoom, loadChat]);
 
   // ------------------------------------------------------------ real time
   const pending = useRef<Set<Topic | "all">>(new Set());
@@ -211,9 +239,10 @@ export function App() {
         if (roomIdRef.current) void f.loadRoom(roomIdRef.current);
       }
       if (all || set.has("chat")) {
-        if (!roomIdRef.current) void f.loadChat();
-        else setChatUnread(true);
+        void f.loadChat();
+        if (viewRef.current !== "chat") setChatUnread(true);
       }
+      if (all || set.has("archive")) setWikiVersion((v) => v + 1);
       if (all || set.has("approval")) void f.loadApprovals();
       if (all || set.has("notification")) void f.loadNotices();
     }, 250);
@@ -272,32 +301,64 @@ export function App() {
       const i = ["1", "2", "3", "4"].indexOf(e.key);
       if (i < 0) return;
       e.preventDefault();
+      const id = (["rooms", "main", "approvals", "inbox"] as PanelId[])[i];
       setPane(i === 0 ? "rooms" : i === 1 ? "main" : "side");
+      setLayout((l) => ({ collapsed: { ...l.collapsed, [id]: false }, max: l.max && l.max !== id ? null : l.max }));
       window.requestAnimationFrame(() => document.getElementById(regions[i])?.focus());
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // ------------------------------------------------------------ actions
-  const send = useCallback(async (text: string): Promise<boolean> => {
-    if (!api) return false;
-    const temp: ChatMessage = { id: -Date.now(), ts: new Date().toISOString(), role: "owner", text, pending: true };
-    setChat((c) => [...(c ?? []), temp]);
-    setSending(true);
+  // ------------------------------------------------------------ layout: minimize / maximize
+  useEffect(() => {
     try {
-      await once("chat", () => request(`${api}/chat`, { method: "POST", body: { text } }));
-      await loadChat();
-      say("에이전트가 응답했습니다.");
-      return true;
-    } catch (e) {
-      setChat((c) => (c ?? []).filter((m) => m.id !== temp.id));
-      if (!(e instanceof AuthRequired)) say(`보내지 못했습니다: ${message(e)}`);
-      return false;
-    } finally {
-      setSending(false);
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify({ collapsed: layout.collapsed }));
+    } catch {
+      /* ignore */
     }
+  }, [layout.collapsed]);
+  const toggleCollapse = useCallback((id: PanelId) => setLayout((l) => {
+    const now = !l.collapsed[id];
+    return { collapsed: { ...l.collapsed, [id]: now }, max: now && l.max === id ? null : l.max };
+  }), []);
+  const toggleMax = useCallback((id: PanelId) => setLayout((l) => ({
+    collapsed: { ...l.collapsed, [id]: false }, max: l.max === id ? null : id,
+  })), []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || !layout.max || document.querySelector("dialog[open]")) return;
+      const t = e.target as HTMLElement;
+      if (t.closest("textarea, input")) return;
+      setLayout((l) => ({ ...l, max: null }));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [layout.max]);
+
+  // ------------------------------------------------------------ actions
+  /** Requests run concurrently: the input stays open while the agent works on earlier requests. */
+  const send = useCallback((text: string) => {
+    if (!api) return;
+    const item: Inflight = { key: `${Date.now()}-${Math.random()}`, text, started: Date.now() };
+    setInflight((l) => [...l, item]);
+    request<{ reply: string }>(`${api}/chat`, { method: "POST", body: { text } })
+      .then(() => { void loadChat(); say("에이전트가 응답했습니다."); })
+      .catch((e) => { if (!(e instanceof AuthRequired)) say(`보내지 못했습니다: ${message(e)}`); })
+      .finally(() => setInflight((l) => l.filter((x) => x.key !== item.key)));
   }, [api, loadChat, say]);
+
+  const saveProfile = useCallback(async (patch: Partial<Profile>) => {
+    if (!api) return;
+    const p = await request<Profile>(`${api}/profile`, { method: "PUT", body: patch });
+    setProfile(p);
+    applyTheme(p.theme);
+    cacheTheme(p.theme);
+    void loadRooms();
+    say(`${p.agent_name}: 설정을 저장했습니다.`);
+  }, [api, loadRooms, say]);
+
+  const choose = useCallback((c: CharacterId) => void saveProfile({ character: c }).catch(() => say("저장하지 못했습니다.")), [saveProfile, say]);
 
   const decide = useCallback((a: Approval, approve: boolean) => {
     const key = `approval:${a.id}`;
@@ -376,8 +437,10 @@ export function App() {
             <li><kbd>Alt</kbd>+<kbd>3</kbd> 승인 대기</li>
             <li><kbd>Alt</kbd>+<kbd>4</kbd> 알림함</li>
             <li><kbd>↑</kbd>/<kbd>↓</kbd> 대화방 이동, <kbd>Enter</kbd> 열기</li>
+            <li><kbd>Esc</kbd> 최대화한 영역을 원래 크기로</li>
           </ul>
         </details>
+        <button type="button" className="btn btn--small" onClick={() => setSettingsOpen(true)}>꾸미기</button>
         {me && <a className="btn btn--small btn--ghost" href={me.logout_url}>로그아웃</a>}
       </div>
     </header>
@@ -400,9 +463,20 @@ export function App() {
     );
   }
 
+  if (!profile) return null;
   const pendingCount = approvals?.length ?? 0;
+  const c = layout.collapsed;
+  const current = route.view === "room" ? roomId : route.view === "wiki" ? "wiki" : "chat";
+  const mainMax = (
+    <button type="button" className="icon-btn icon-btn--max" aria-pressed={layout.max === "main"}
+            title={layout.max === "main" ? "대화 원래 크기 (Esc)" : "대화 최대화"} onClick={() => toggleMax("main")}>
+      <span aria-hidden="true">{layout.max === "main" ? "⤡" : "⤢"}</span>
+      <span className="sr-only">{layout.max === "main" ? "대화 원래 크기" : "대화 최대화"}</span>
+    </button>
+  );
   return (
-    <div className="app" data-pane={pane}>
+    <div className="app" data-pane={pane} data-max={layout.max ?? undefined}
+         data-rooms={c.rooms ? "collapsed" : undefined} data-side={c.approvals && c.inbox ? "collapsed" : undefined}>
       <a className="skip" href="#main-h" onClick={(e) => { e.preventDefault(); setPane("main"); document.getElementById("main-h")?.focus(); }}>
         본문으로 건너뛰기
       </a>
@@ -419,24 +493,39 @@ export function App() {
       </div>
       <div className="layout">
         <div className="pane pane--rooms">
-          <RoomList rooms={rooms} me={me.user} current={roomId} chatUnread={chatUnread}
-                    onOpen={(id) => navigate(id ? hrefFor({ room: id }) : hrefFor({}))} />
+          <Panel id="rooms" as="nav" label="대화방" headingId="rooms-h" title="대화방" collapsed={!!c.rooms}
+                 maximized={layout.max === "rooms"} onCollapse={() => toggleCollapse("rooms")} onMaximize={() => toggleMax("rooms")}>
+            <RoomList rooms={rooms} me={me.user} profile={profile} current={current} chatUnread={chatUnread} onNavigate={navigate} />
+          </Panel>
         </div>
         <main className="pane pane--main">
-          {roomId ? (
-            <RoomView room={room} error={roomError} me={me.user} onGoChat={() => navigate(hrefFor({}))} />
+          <div className="main-tools">{mainMax}</div>
+          {route.view === "room" && roomId ? (
+            <RoomView room={room} error={roomError} me={me.user} onGoChat={() => navigate(hrefFor({}))} onNavigate={navigate} />
+          ) : route.view === "wiki" ? (
+            <Wiki api={api} docId={wikiDoc ?? null} version={wikiVersion} onNavigate={navigate} say={say} />
           ) : (
-            <AgentChat name={me.name} messages={chat} sending={sending} onSend={send} />
+            <AgentChat owner={me.name} profile={profile} messages={chat} inflight={inflight} onSend={send}
+                       onCustomize={() => setSettingsOpen(true)} onChoose={choose} onNavigate={navigate} />
           )}
         </main>
         <aside className="pane pane--side" aria-label="승인 대기와 알림함">
-          <Approvals items={approvals} decisions={decisions} focusId={approvalFocus} onDecide={decide}
-                     onOpenRoom={(id) => navigate(hrefFor({ room: id }))} />
-          <Inbox items={notices} unread={unread} onOpen={openNotice} onRead={(n) => void markRead(n)}
-                 onReadAll={() => void readAll()}
-                 onInternalLink={(url, n) => { void markRead(n); navigate(url.pathname + url.search); }} />
+          <Panel id="approvals" label="승인 대기" headingId="approvals-h" collapsed={!!c.approvals}
+                 maximized={layout.max === "approvals"} onCollapse={() => toggleCollapse("approvals")} onMaximize={() => toggleMax("approvals")}
+                 title={<>승인 대기 {pendingCount > 0 && <span className="count">{pendingCount}</span>}</>}>
+            <Approvals items={approvals} decisions={decisions} focusId={approvalFocus} onDecide={decide}
+                       onOpenRoom={(id) => navigate(hrefFor({ room: id }))} />
+          </Panel>
+          <Panel id="inbox" label="알림함" headingId="inbox-h" collapsed={!!c.inbox}
+                 maximized={layout.max === "inbox"} onCollapse={() => toggleCollapse("inbox")} onMaximize={() => toggleMax("inbox")}
+                 title={<>알림함 {unread > 0 && <span className="count" aria-label={`읽지 않은 알림 ${unread}개`}>{unread}</span>}</>}>
+            <Inbox items={notices} unread={unread} onOpen={openNotice} onRead={(n) => void markRead(n)}
+                   onReadAll={() => void readAll()}
+                   onInternalLink={(url, n) => { void markRead(n); navigate(url.pathname + url.search); }} />
+          </Panel>
         </aside>
       </div>
+      <Settings open={settingsOpen} profile={profile} onClose={() => setSettingsOpen(false)} onSave={saveProfile} />
       <div className="sr-only" role="status" aria-live="polite">{announce}</div>
     </div>
   );

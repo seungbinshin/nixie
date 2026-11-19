@@ -16,6 +16,7 @@ import os
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel
 
@@ -28,12 +29,14 @@ from a2a.server.routes import add_a2a_routes_to_fastapi, create_agent_card_route
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.types import (
-    AgentCapabilities, AgentCard, AgentInterface, AgentProvider, AgentSkill, Part, Task, TaskState, TaskStatus,
+    AgentCapabilities, AgentCard, AgentExtension, AgentInterface, AgentProvider, AgentSkill, Part, Task, TaskState,
+    TaskStatus,
 )
 from google.protobuf import struct_pb2
 from google.protobuf.json_format import ParseDict
 
 from .agent import ConflictError, NixieAgent
+from .profile import PROFILE_EXTENSION, ProfileError, load_profile, save_profile
 from .peer import PeerError
 from .policy import PolicyError
 
@@ -83,13 +86,17 @@ class NixieExecutor(AgentExecutor):
         await up.complete()
 
 
-def agent_card(cfg) -> AgentCard:
+def agent_card(cfg, profile: dict | None = None) -> AgentCard:
+    prof = profile or load_profile(cfg.home)
+    ext = AgentExtension(uri=PROFILE_EXTENSION, description="Agent name and character shown to people",
+                         required=False, params=ParseDict({"agent_name": prof["agent_name"],
+                                                           "character": prof["character"]}, struct_pb2.Struct()))
     return AgentCard(
         name=f"Nixie agent of {cfg.owner_name}",
         description="Personal agent. Accepts requests only from trusted peer agents.",
         provider=AgentProvider(organization="Nixie", url=cfg.public_url),
         version="0.1.0",
-        capabilities=AgentCapabilities(streaming=False, push_notifications=False),
+        capabilities=AgentCapabilities(streaming=False, push_notifications=False, extensions=[ext]),
         default_input_modes=["application/json", "text"],
         default_output_modes=["application/json"],
         skills=[
@@ -132,6 +139,22 @@ class ReadIn(BaseModel):
     upto: int | None = None
 
 
+class ThemeIn(BaseModel):
+    mode: str | None = None
+    accent: str | None = None
+    font: str | None = None
+
+
+class ProfileIn(BaseModel):
+    character: str | None = None
+    agent_name: str | None = None
+    theme: ThemeIn | None = None
+
+
+class NoteIn(BaseModel):
+    text: str
+
+
 class IngestItem(BaseModel):
     title: str
     body: str = ""
@@ -151,6 +174,12 @@ def _same(a: str, b: str) -> bool:
 
 def create_app(agent: NixieAgent) -> FastAPI:
     app = FastAPI(title=f"Nixie ({agent.cfg.agent_id})")
+
+    @app.get("/.well-known/agent-card.json")
+    async def live_card() -> JSONResponse:
+        """Registered before the A2A routes, so the card shows the current agent name and character."""
+        return JSONResponse(MessageToDict(agent_card(agent.cfg, agent.profile())))
+
     card = agent_card(agent.cfg)
     handler = DefaultRequestHandler(agent_executor=NixieExecutor(agent), task_store=InMemoryTaskStore(), agent_card=card)
     add_a2a_routes_to_fastapi(
@@ -199,19 +228,35 @@ def create_app(agent: NixieAgent) -> FastAPI:
     @app.get("/owner/me", dependencies=[Depends(owner)])
     async def me() -> dict[str, Any]:
         return {"agent_id": agent.cfg.agent_id, "owner_name": agent.cfg.owner_name, "sso_user": agent.cfg.sso_user,
-                "timezone": agent.cfg.timezone, "llm": agent.llm.enabled,
+                "timezone": agent.cfg.timezone, "llm": agent.llm.enabled, "profile": agent.profile(),
                 "peers": [{"id": p.name, "name": p.label, "room_id": agent.room_id(p.name)}
                           for p in sorted(agent.cfg.peers.values(), key=lambda p: p.name)]}
+
+    @app.get("/owner/profile", dependencies=[Depends(owner)])
+    async def get_profile() -> dict[str, Any]:
+        return agent.profile()
+
+    @app.put("/owner/profile", dependencies=[Depends(owner)])
+    async def put_profile(body: ProfileIn) -> dict[str, Any]:
+        """Character (hadaeng | hanyang), agent name (free, 1-20 chars), UI theme (mode, accent, font)."""
+        patch = body.model_dump(exclude_none=True)
+        if "theme" in patch:
+            patch["theme"] = {k: v for k, v in patch["theme"].items() if v is not None}
+        try:
+            return save_profile(agent.cfg.home, patch)
+        except ProfileError as e:
+            raise HTTPException(400, str(e)) from e
 
     @app.get("/owner/skills", dependencies=[Depends(owner)])
     async def skills() -> list[dict[str, Any]]:
         return agent.tasks.catalog()
 
     @app.post("/owner/chat", dependencies=[Depends(owner)])
-    async def chat(body: ChatIn) -> dict[str, str]:
+    async def chat(body: ChatIn) -> dict[str, Any]:
+        """Requests run concurrently. The reply carries reply_to (id of the request line)."""
         if not body.text.strip():
             raise HTTPException(400, "empty message")
-        return {"reply": await agent.owner_chat(body.text)}
+        return await agent.owner_chat_turn(body.text)
 
     @app.get("/owner/chat", dependencies=[Depends(owner)])
     async def chat_history(limit: int = 200) -> dict[str, Any]:
@@ -267,12 +312,12 @@ def create_app(agent: NixieAgent) -> FastAPI:
     # Rooms: one per agent pair (max 2 participants). Owners read; they cannot write lines.
     @app.get("/owner/rooms", dependencies=[Depends(owner)])
     async def rooms() -> list[dict[str, Any]]:
-        return agent.rooms()
+        return await agent.rooms()
 
     @app.get("/owner/rooms/{room_id}", dependencies=[Depends(owner)])
     async def room(room_id: str) -> dict[str, Any]:
         try:
-            return agent.room(room_id)
+            return await agent.room(room_id)
         except KeyError as e:
             raise HTTPException(404, "no such room") from e
 
@@ -296,6 +341,39 @@ def create_app(agent: NixieAgent) -> FastAPI:
     @app.post("/owner/notifications/{nid}/read", dependencies=[Depends(owner)])
     async def notification_read(nid: str) -> dict[str, bool]:
         return {"marked": agent.store.mark_notification_read(nid)}
+
+    # Work archive: read-only wiki. No endpoint changes or deletes a document.
+    @app.get("/owner/archive", dependencies=[Depends(owner)])
+    async def archive_list(q: str = "", topic: str | None = None, limit: int = 50) -> dict[str, Any]:
+        return {"items": agent.archive.search(q, min(max(limit, 1), 200), topic), "topics": agent.archive.topics(),
+                "integrity_ok": agent.store.verify_archive()}
+
+    @app.get("/owner/archive/export.zip", dependencies=[Depends(owner)])
+    async def archive_zip() -> Response:
+        return Response(agent.archive.zip_bytes(), media_type="application/zip",
+                        headers={"Content-Disposition": 'attachment; filename="nixie-wiki.zip"'})
+
+    @app.get("/owner/archive/bundle", dependencies=[Depends(owner)])
+    async def archive_bundle() -> dict[str, Any]:
+        """All files of the local wiki folder (docs are read-only; index.md and topics/ are rebuilt)."""
+        return agent.archive.bundle()
+
+    @app.get("/owner/archive/{doc_id}", dependencies=[Depends(owner)])
+    async def archive_get(doc_id: str) -> dict[str, Any]:
+        d = agent.archive.get(doc_id)
+        if not d:
+            raise HTTPException(404, "no such document")
+        return d
+
+    @app.post("/owner/archive/{doc_id}/notes", dependencies=[Depends(owner)])
+    async def archive_note(doc_id: str, body: NoteIn) -> dict[str, Any]:
+        """Add a follow-up note as a NEW document. The original stays as it is."""
+        try:
+            return agent.archive.note(doc_id, body.text)
+        except KeyError as e:
+            raise HTTPException(404, "no such document") from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
     @app.post("/ingest/notifications", dependencies=[Depends(ingest_auth)])
     async def ingest(body: IngestIn) -> dict[str, Any]:

@@ -24,10 +24,7 @@ export function Approvals({ items, decisions, focusId, onDecide, onOpenRoom }: P
   }, [focusId, items]);
 
   return (
-    <section className="panel" aria-labelledby="approvals-h">
-      <h2 id="approvals-h" className="pane-title" tabIndex={-1}>
-        승인 대기 {items && items.length > 0 && <span className="count">{items.length}</span>}
-      </h2>
+    <>
       {items === null ? (
         <p className="muted pad" role="status">불러오는 중…</p>
       ) : items.length === 0 ? (
@@ -73,6 +70,6 @@ export function Approvals({ items, decisions, focusId, onDecide, onOpenRoom }: P
           })}
         </ul>
       )}
-    </section>
+    </>
   );
 }
