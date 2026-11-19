@@ -5,6 +5,7 @@ import { Panel, type PanelId } from "./components/Panel";
 import { Settings } from "./components/Settings";
 import { Wiki } from "./components/Wiki";
 import type { CharacterId } from "./characters";
+import { IconArrowDown, IconArrowUp, IconMaximize, IconRestore } from "./icons";
 import { applyTheme, cacheTheme } from "./theme";
 import { Approvals, type DecisionState } from "./components/Approvals";
 import { Inbox } from "./components/Inbox";
@@ -436,7 +437,7 @@ export function App() {
             <li><kbd>Alt</kbd>+<kbd>2</kbd> 대화 본문</li>
             <li><kbd>Alt</kbd>+<kbd>3</kbd> 승인 대기</li>
             <li><kbd>Alt</kbd>+<kbd>4</kbd> 알림함</li>
-            <li><kbd>↑</kbd>/<kbd>↓</kbd> 대화방 이동, <kbd>Enter</kbd> 열기</li>
+            <li><kbd><IconArrowUp /><span className="sr-only">위쪽 화살표</span></kbd>/<kbd><IconArrowDown /><span className="sr-only">아래쪽 화살표</span></kbd> 대화방 이동, <kbd>Enter</kbd> 열기</li>
             <li><kbd>Esc</kbd> 최대화한 영역을 원래 크기로</li>
           </ul>
         </details>
@@ -477,7 +478,7 @@ export function App() {
   const mainMax = (
     <button type="button" className="icon-btn icon-btn--max round-btn" aria-pressed={layout.max === "main"}
             title={layout.max === "main" ? "대화 원래 크기 (Esc)" : "대화 최대화"} onClick={() => toggleMax("main")}>
-      <span aria-hidden="true">{layout.max === "main" ? "⤡" : "⤢"}</span>
+      {layout.max === "main" ? <IconRestore /> : <IconMaximize />}
       <span className="sr-only">{layout.max === "main" ? "대화 원래 크기" : "대화 최대화"}</span>
     </button>
   );

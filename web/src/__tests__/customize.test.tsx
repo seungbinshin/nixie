@@ -57,3 +57,17 @@ describe("names and routes", () => {
     expect(hrefFor({ wiki: "abc" })).toBe("/?wiki=abc");
   });
 });
+
+describe("Windows rendering: no faux bold", () => {
+  // weights that the bundled/system font files really have
+  const REAL: Record<string, number[]> = { "'Gowun Dodum'": [400], "'Jua'": [400], "'Dongle'": [300, 400, 700],
+    "'Segoe UI', 'Malgun Gothic'": [400, 700] };
+  it("every font choice uses real weights for headings and emphasis", async () => {
+    const { FONTS } = await import("../theme");
+    for (const f of Object.values(FONTS)) {
+      expect(REAL[f.body]).toContain(400);
+      expect(REAL[f.display]).toContain(f.displayWeight);
+      expect(REAL[f.strong]).toContain(f.strongWeight);
+    }
+  });
+});

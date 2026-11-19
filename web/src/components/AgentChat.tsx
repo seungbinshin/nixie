@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Avatar, CHARACTERS, type CharacterId } from "../characters";
 import { kstFull, kstTime } from "../time";
 import type { ChatMessage, Profile } from "../types";
+import { IconReply } from "../icons";
 import { josa } from "../josa";
 import { Hero } from "./Hero";
 import { Markdown } from "./Markdown";
@@ -135,7 +136,7 @@ export function AgentChat({ owner, profile, messages, inflight, onSend, onCustom
                   <div className="msg-col">
                     <div className="bubble">
                       <span className="sr-only">{mine ? "나: " : `${name}: `}</span>
-                      {quote && <p className="reply-quote">↪ {quote.slice(0, 80)}</p>}
+                      {quote && <p className="reply-quote"><IconReply /> {quote.slice(0, 80)}</p>}
                       <Body text={m.text} onNavigate={onNavigate} />
                     </div>
                     {(lastOfGroup || waiting) && (
@@ -188,7 +189,7 @@ export function AgentChat({ owner, profile, messages, inflight, onSend, onCustom
               el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
             }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 submit(text);
               }

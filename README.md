@@ -170,7 +170,7 @@ curl -H "X-Admin-Token: $NIXIE_ADMIN_TOKEN" localhost:8080/admin/sandboxes      
 ```bash
 pip install -e ".[test]"
 pytest -q        # 46건. Chromium/웹 빌드/nginx/nixie:latest 이미지가 없으면 해당 테스트는 skip
-(cd web && npm test)   # 웹 UI 단위 테스트 19건
+(cd web && npm test)   # 웹 UI 단위 테스트 20건
 ```
 
 ## 제한 사항

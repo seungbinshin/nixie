@@ -1,4 +1,5 @@
 import { Avatar } from "../characters";
+import { IconBook } from "../icons";
 import { hrefFor } from "../route";
 import { kstFull, kstShort } from "../time";
 import type { Profile, RoomSummary } from "../types";
@@ -50,7 +51,7 @@ export function RoomList({ rooms, me, profile, current, chatUnread, onNavigate }
           <a data-nav href={hrefFor({ wiki: "" })} className="room-item" aria-current={current === "wiki" ? "page" : undefined}
              onClick={link(hrefFor({ wiki: "" }))}>
             <span className="room-row">
-              <span className="avatar avatar--icon" aria-hidden="true">📚</span>
+              <span className="avatar avatar--icon" aria-hidden="true"><IconBook /></span>
               <span className="room-text">
                 <span className="room-name">업무 위키</span>
                 <span className="room-last">자동 보관된 업무 기록 (수정 불가)</span>

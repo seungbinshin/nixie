@@ -63,6 +63,26 @@ def browser(pw):
     b.close()
 
 
+RENDER_CHECK = """() => {
+  // Windows rendering: (1) no faux bold: a weight must exist in the font file; (2) no symbol characters that
+  // depend on the PC's fonts (arrows, shapes, emoji) in the UI chrome; icons are SVG.
+  const real = {"Gowun Dodum": [400], "Jua": [400], "Dongle": [300, 400, 700]};
+  const bad = [];
+  for (const el of document.querySelectorAll("body *")) {
+    if (![...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim())) continue;
+    const cs = getComputedStyle(el);
+    const fam = cs.fontFamily.split(",")[0].replace(/["']/g, "").trim();
+    if (real[fam] && !real[fam].includes(Number(cs.fontWeight))) bad.push(fam + " " + cs.fontWeight + ": " + el.textContent.slice(0, 30));
+    if (cs.fontSynthesisWeight && cs.fontSynthesisWeight !== "none") bad.push("synthesis on " + el.tagName);
+  }
+  const chrome = [...document.querySelectorAll("button, .pane-title, .room-name, .conv-head, .hero, .switcher, .topbar")]
+    .map(e => e.textContent).join(" ");
+  const sym = chrome.match(/[\u2190-\u21FF\u2900-\u297F\u25A0-\u25FF\u2B00-\u2BFF]|\p{Extended_Pictographic}/gu);
+  if (sym) bad.push("symbol glyphs: " + sym.join(""));
+  return bad;
+}"""
+
+
 def open_as(browser, gw: str, user: str, path: str = "/", **ctx):
     context = browser.new_context(extra_http_headers={"X-Auth-Request-User": user, "X-Nixie-Proxy-Secret": PROXY_SECRET},
                                   locale="ko-KR", timezone_id="Asia/Seoul", **ctx)
@@ -117,6 +137,7 @@ def test_realtime_rooms_keyboard_approval_once(stack, browser):
         page.locator(".conv-meta .tag", has_text="읽기 전용").wait_for()
         assert page.locator("main textarea").count() == 0
         assert "KST" in page.locator(".messages").inner_text()
+        assert page.evaluate(RENDER_CHECK) == []  # default font (Gowun Dodum + Jua)
         wait_until(lambda: page.locator(".rooms .badge").count() == 0, timeout=15)
         assert "room=user1~user2" in page.url
         assert errors == [], errors
@@ -182,6 +203,7 @@ def test_character_theme_markdown_panels_concurrency_wiki(stack, browser):
         dlg.get_by_role("button", name="저장").click()
         page.locator("#main-h", has_text="나비").wait_for(timeout=15000)
         assert page.evaluate("getComputedStyle(document.body).fontFamily").lstrip('"').startswith("Jua")
+        assert page.evaluate(RENDER_CHECK) == []  # Jua only has 400: emphasis must not be faux bold
         prof = get(f"{gw}/auth/me", headers=sso("user5")).json()["profile"]
         assert (prof["agent_name"], prof["character"], prof["theme"]["accent"], prof["theme"]["font"]) == \
             ("나비", "hanyang", "#22b8a0", "jua")
@@ -227,7 +249,7 @@ def test_character_theme_markdown_panels_concurrency_wiki(stack, browser):
         page.get_by_label("후속 메모 (원문은 바뀌지 않고, 메모가 새 문서로 보관됩니다)").fill("다음 주에 다시 확인")
         page.get_by_role("button", name="보관").click()
         page.locator("#main-h", has_text="후속 메모:").wait_for(timeout=15000)
-        page.get_by_role("link", name="← 업무 위키").click()
+        page.locator(".conv-head a", has_text="업무 위키").click()
         page.get_by_role("heading", name="업무 위키").wait_for()
         assert page.get_by_role("link", name="ZIP 내려받기").get_attribute("href").endswith("/archive/export.zip")
         page.locator(".wiki-item").nth(1).wait_for(timeout=15000)  # ask + remember + note (list is debounced)

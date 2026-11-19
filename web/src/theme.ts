@@ -17,13 +17,27 @@ export const PRESETS: { name: string; color: string }[] = [
   { name: "하이닉스 레드", color: "#e4002b" },
 ];
 
-export const FONTS: Record<FontId, { label: string; body: string; display: string; scale: number }> = {
-  gowun: { label: "고운돋움", body: "'Gowun Dodum'", display: "'Jua'", scale: 1 },
-  jua: { label: "주아", body: "'Jua'", display: "'Jua'", scale: 1 },
-  dongle: { label: "동글", body: "'Dongle'", display: "'Dongle'", scale: 1.5 },
-  system: { label: "시스템 글꼴", body: "'Segoe UI', 'Malgun Gothic'", display: "'Segoe UI', 'Malgun Gothic'", scale: 1 },
+// Gowun Dodum and Jua have one weight (400). A bold that the font does not have is drawn by the browser
+// ("faux bold"), which looks smeared with Windows ClearType. So emphasis uses a real face: Jua, Dongle 700,
+// or Malgun Gothic Bold. font-synthesis: none (styles.css) keeps the browser from faking bold and italic.
+export interface FontDef {
+  label: string; body: string; display: string; displayWeight: number; strong: string; strongWeight: number;
+  strongColor: string; scale: number;
+}
+export const FONTS: Record<FontId, FontDef> = {
+  gowun: { label: "고운돋움", body: "'Gowun Dodum'", display: "'Jua'", displayWeight: 400, strong: "'Jua'", strongWeight: 400,
+           strongColor: "inherit", scale: 1 },
+  jua: { label: "주아", body: "'Jua'", display: "'Jua'", displayWeight: 400, strong: "'Jua'", strongWeight: 400,
+         strongColor: "var(--link)", scale: 1 }, // one weight only: emphasis by color
+  dongle: { label: "동글", body: "'Dongle'", display: "'Dongle'", displayWeight: 700, strong: "'Dongle'", strongWeight: 700,
+            strongColor: "inherit", scale: 1.5 },
+  system: { label: "시스템 글꼴", body: "'Segoe UI', 'Malgun Gothic'", display: "'Segoe UI', 'Malgun Gothic'", displayWeight: 700,
+            strong: "'Segoe UI', 'Malgun Gothic'", strongWeight: 700, strongColor: "inherit", scale: 1 },
 };
-const FALLBACK = ", 'Malgun Gothic', 'Apple SD Gothic Neo', system-ui, sans-serif";
+// Windows first: Malgun Gothic (맑은 고딕) is on every Korean Windows; never fall to Gulim/Batang.
+// Emoji and symbols: Segoe UI Emoji / Segoe UI Symbol on Windows.
+const FALLBACK = ", 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', 'Noto Sans KR', system-ui, sans-serif, " +
+  "'Segoe UI Emoji', 'Segoe UI Symbol', 'Apple Color Emoji', 'Noto Color Emoji'";
 
 type RGB = [number, number, number];
 const hex = (h: string): RGB => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)) as RGB;
@@ -91,8 +105,13 @@ export function applyTheme(t: Theme): void {
   const f = FONTS[t.font] ?? FONTS.gowun;
   root.style.setProperty("--font-body", f.body + FALLBACK);
   root.style.setProperty("--font-display", f.display + FALLBACK);
+  root.style.setProperty("--display-weight", String(f.displayWeight));
+  root.style.setProperty("--font-strong", f.strong + FALLBACK);
+  root.style.setProperty("--strong-weight", String(f.strongWeight));
+  root.style.setProperty("--strong-color", f.strongColor);
   root.style.setProperty("--font-scale", String(f.scale));
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? PALETTE.dark.surface : t.accent);
+  // title bar of the installed Windows app: same color as the top bar
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? PALETTE.dark.surface : PALETTE.light.surface);
 }
 
 media?.addEventListener?.("change", () => {

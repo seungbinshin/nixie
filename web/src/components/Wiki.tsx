@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, request } from "../api";
 import { hrefFor } from "../route";
 import { kstFull, kstShort } from "../time";
+import { IconBack, IconFollowUp } from "../icons";
 import { Markdown } from "./Markdown";
 import type { WikiDoc, WikiItem, WikiList } from "../types";
 import { canWrite, chooseFolder, folderSupported, savedFolder, syncBundle, type Bundle, type SyncResult } from "../wikiSync";
@@ -132,7 +133,7 @@ export function Wiki({ api, docId, version, onNavigate, say }: Props) {
     return (
       <section className="conversation wiki" aria-labelledby="main-h">
         <header className="conv-head">
-          <p><a href={hrefFor({ wiki: "" })} onClick={(e) => { e.preventDefault(); onNavigate(hrefFor({ wiki: "" })); }}>← 업무 위키</a></p>
+          <p><a href={hrefFor({ wiki: "" })} onClick={(e) => { e.preventDefault(); onNavigate(hrefFor({ wiki: "" })); }}><IconBack /> 업무 위키</a></p>
           <h2 id="main-h" tabIndex={-1}>{doc ? doc.title : "업무 위키 문서"}</h2>
           {doc && (
             <p className="conv-meta">
@@ -208,7 +209,7 @@ export function Wiki({ api, docId, version, onNavigate, say }: Props) {
                 <li key={d.id}>
                   <a className="wiki-item" href={hrefFor({ wiki: d.id })} onClick={go(d.id)}>
                     <span className="room-row">
-                      <span className="room-name">{d.follows ? "↳ " : ""}{d.title}</span>
+                      <span className="room-name">{d.follows && <><IconFollowUp /><span className="sr-only">후속 메모: </span></>}{d.title}</span>
                       <time className="room-time" dateTime={d.ts} title={kstFull(d.ts)}>{kstShort(d.ts)}</time>
                     </span>
                     <span className="wiki-meta"><span className="tag">{KIND[d.kind] ?? d.kind}</span> {d.topic}</span>
