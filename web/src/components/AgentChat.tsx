@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Avatar, CHARACTERS, type CharacterId } from "../characters";
 import { kstFull, kstTime } from "../time";
 import type { ChatMessage, Profile } from "../types";
 import { josa } from "../josa";
+import { Hero } from "./Hero";
 import { Markdown } from "./Markdown";
 
 export interface Inflight {
@@ -20,6 +21,9 @@ interface Props {
   onCustomize(): void;
   onChoose(c: CharacterId): void;
   onNavigate(href: string): void;
+  menuExpanded: boolean;
+  onMenu(): void;
+  extraTools?: ReactNode; // maximize button
 }
 
 const QUICK = [
@@ -43,7 +47,7 @@ function Body({ text, onNavigate }: { text: string; onNavigate(href: string): vo
 }
 
 /** Chat between the owner and the owner's own agent. Requests run concurrently: the input never waits. */
-export function AgentChat({ owner, profile, messages, inflight, onSend, onCustomize, onChoose, onNavigate }: Props) {
+export function AgentChat({ owner, profile, messages, inflight, onSend, onCustomize, onChoose, onNavigate, menuExpanded, onMenu, extraTools }: Props) {
   const [text, setText] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -67,6 +71,7 @@ export function AgentChat({ owner, profile, messages, inflight, onSend, onCustom
     const v = value.trim();
     if (!v) return;
     setText("");
+    if (inputRef.current) inputRef.current.style.height = "auto";
     onSend(v);
     inputRef.current?.focus();
   };
@@ -78,15 +83,17 @@ export function AgentChat({ owner, profile, messages, inflight, onSend, onCustom
   let prevOwner = 0;
   return (
     <section className="conversation" aria-labelledby="main-h">
-      <header className="conv-head conv-head--agent">
-        <Avatar character={profile.character} size={52} label={`${name} (${CHARACTERS[profile.character].kind})`} />
-        <div className="agent-id">
-          <h2 id="main-h" tabIndex={-1}>{name}</h2>
-          <p className="conv-meta">{owner}님의 업무 에이전트 · 회의실, 휴가, 결재, 문서 검색, IT 요청, 동료 일정 조율</p>
-        </div>
-        <button type="button" className="btn btn--small" onClick={onCustomize}>꾸미기</button>
-      </header>
-      <div className="messages" role="log" aria-label={`${josa(name, "와/과")}의 대화`} aria-live="polite" tabIndex={0}>
+      <Hero
+        avatars={<Avatar character={profile.character} size={72} label={`${name} (${CHARACTERS[profile.character].kind})`} />}
+        title={name}
+        menuExpanded={menuExpanded}
+        onMenu={onMenu}
+        right={<>
+          <button type="button" className="pill-btn" onClick={onCustomize}>꾸미기</button>
+          {extraTools}
+        </>}
+      />
+      <div className="messages messages--hero" role="log" aria-label={`${josa(name, "와/과")}의 대화`} aria-live="polite" tabIndex={0}>
         {messages === null ? (
           <p className="muted pad" role="status">대화를 불러오는 중…</p>
         ) : messages.length === 0 && temps.length === 0 ? (
@@ -107,40 +114,45 @@ export function AgentChat({ owner, profile, messages, inflight, onSend, onCustom
               </div>
             ) : (
               <div className="hello">
-                <Avatar character={profile.character} size={96} />
                 <p>안녕하세요, {name}입니다! 무엇을 도와 드릴까요?</p>
+                <p className="muted">{owner}님의 업무 에이전트 · 회의실, 휴가, 결재, 문서 검색, IT 요청, 동료 일정 조율</p>
                 <p className="muted">예: "내일 오후 2시에 6명 회의실 찾아 줘", "다음 주에 동료와 1시간 회의 잡아 줘"</p>
               </div>
             )}
           </div>
         ) : (
           <ol className="msg-list">
-            {(messages ?? []).map((m) => {
+            {(messages ?? []).map((m, i, all) => {
               const mine = m.role === "owner";
               const waiting = mine && !answered.has(m.id) && Date.now() - Date.parse(m.ts) < STALE_MS;
               const replyTo = !mine && m.data?.reply_to ? byId.get(m.data.reply_to) : undefined;
               const quote = replyTo && replyTo.id !== prevOwner ? replyTo.text : null; // reply to an older request
               if (mine) prevOwner = m.id;
+              const next = all[i + 1];
+              const lastOfGroup = !next || next.role !== m.role || Date.parse(next.ts) - Date.parse(m.ts) > 5 * 60000;
               return (
-                <li key={m.id} className={"msg" + (mine ? " msg--mine" : "")}>
-                  {!mine && <Avatar character={profile.character} size={32} />}
-                  <div className="bubble">
-                    <p className="msg-head">
-                      <span className="who">{mine ? "나" : name}</span>
-                      <time dateTime={m.ts} title={kstFull(m.ts)}>{kstTime(m.ts)} KST</time>
-                      {waiting && <span className="working">처리 중</span>}
-                    </p>
-                    {quote && <p className="reply-quote">↪ {quote.slice(0, 80)}</p>}
-                    <Body text={m.text} onNavigate={onNavigate} />
+                <li key={m.id} className={"msg" + (mine ? " msg--mine" : "") + (lastOfGroup ? " msg--last" : "")}>
+                  <div className="msg-col">
+                    <div className="bubble">
+                      <span className="sr-only">{mine ? "나: " : `${name}: `}</span>
+                      {quote && <p className="reply-quote">↪ {quote.slice(0, 80)}</p>}
+                      <Body text={m.text} onNavigate={onNavigate} />
+                    </div>
+                    {(lastOfGroup || waiting) && (
+                      <p className="msg-meta">
+                        <time dateTime={m.ts} title={kstFull(m.ts)}>{kstTime(m.ts)} KST</time>
+                        {waiting && <span className="working">처리 중</span>}
+                      </p>
+                    )}
                   </div>
                 </li>
               );
             })}
             {temps.map((t) => (
-              <li key={t.key} className="msg msg--mine">
-                <div className="bubble">
-                  <p className="msg-head"><span className="who">나</span><span className="working">보내는 중</span></p>
-                  <p className="msg-text">{t.text}</p>
+              <li key={t.key} className="msg msg--mine msg--last">
+                <div className="msg-col">
+                  <div className="bubble"><span className="sr-only">나: </span><p className="msg-text">{t.text}</p></div>
+                  <p className="msg-meta"><span className="working">보내는 중</span></p>
                 </div>
               </li>
             ))}
@@ -161,15 +173,20 @@ export function AgentChat({ owner, profile, messages, inflight, onSend, onCustom
           ))}
         </div>
         <label htmlFor="composer-input" className="sr-only">{name}에게 보낼 메시지</label>
-        <div className="composer-row">
+        <div className="composer-pill">
           <textarea
             id="composer-input"
             ref={inputRef}
-            rows={2}
+            rows={1}
             value={text}
-            placeholder={`${name}에게 요청하십시오 (Enter: 보내기, Shift+Enter: 줄 바꿈)`}
+            placeholder={`${name}에게 메시지 보내기`}
             aria-describedby="composer-help"
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              const el = e.target; // grow with the text, up to about 6 lines
+              el.style.height = "auto";
+              el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
@@ -177,7 +194,12 @@ export function AgentChat({ owner, profile, messages, inflight, onSend, onCustom
               }
             }}
           />
-          <button type="submit" className="btn btn--primary" disabled={!text.trim()}>보내기</button>
+          <button type="submit" className="send-btn" disabled={!text.trim()} title="보내기 (Enter)">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+              <path d="M12 19V6M6 11.5 12 5.5l6 6" stroke="currentColor" strokeWidth="2.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span className="sr-only">보내기</span>
+          </button>
         </div>
         <p id="composer-help" className="sr-only">Enter 키로 보내고 Shift+Enter로 줄을 바꿉니다. 처리 중에도 새 요청을 보낼 수 있습니다.</p>
       </form>

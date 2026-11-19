@@ -427,7 +427,7 @@ export function App() {
       </p>
       <div className="top-actions">
         {notifyPerm === "default" && (
-          <button type="button" className="btn btn--small" onClick={() => void enableDesktop()}>데스크톱 알림 켜기</button>
+          <button type="button" className="btn btn--small" data-keep onClick={() => void enableDesktop()}><span className="desk-only">데스크톱 </span>알림 켜기</button>
         )}
         <details className="shortcuts">
           <summary>단축키</summary>
@@ -467,8 +467,15 @@ export function App() {
   const pendingCount = approvals?.length ?? 0;
   const c = layout.collapsed;
   const current = route.view === "room" ? roomId : route.view === "wiki" ? "wiki" : "chat";
+  // round menu button in the chat header: phone -> show the room list; wider -> fold or open the room column
+  const narrow = typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
+  const menuExpanded = narrow ? pane === "rooms" : !c.rooms;
+  const toggleMenu = () => {
+    if (window.matchMedia("(max-width: 760px)").matches) setPane((p) => (p === "rooms" ? "main" : "rooms"));
+    else toggleCollapse("rooms");
+  };
   const mainMax = (
-    <button type="button" className="icon-btn icon-btn--max" aria-pressed={layout.max === "main"}
+    <button type="button" className="icon-btn icon-btn--max round-btn" aria-pressed={layout.max === "main"}
             title={layout.max === "main" ? "대화 원래 크기 (Esc)" : "대화 최대화"} onClick={() => toggleMax("main")}>
       <span aria-hidden="true">{layout.max === "main" ? "⤡" : "⤢"}</span>
       <span className="sr-only">{layout.max === "main" ? "대화 원래 크기" : "대화 최대화"}</span>
@@ -499,14 +506,16 @@ export function App() {
           </Panel>
         </div>
         <main className="pane pane--main">
-          <div className="main-tools">{mainMax}</div>
+          {route.view === "wiki" && <div className="main-tools">{mainMax}</div>}
           {route.view === "room" && roomId ? (
-            <RoomView room={room} error={roomError} me={me.user} onGoChat={() => navigate(hrefFor({}))} onNavigate={navigate} />
+            <RoomView room={room} error={roomError} me={me.user} onGoChat={() => navigate(hrefFor({}))} onNavigate={navigate}
+                      menuExpanded={menuExpanded} onMenu={toggleMenu} extraTools={mainMax} />
           ) : route.view === "wiki" ? (
             <Wiki api={api} docId={wikiDoc ?? null} version={wikiVersion} onNavigate={navigate} say={say} />
           ) : (
             <AgentChat owner={me.name} profile={profile} messages={chat} inflight={inflight} onSend={send}
-                       onCustomize={() => setSettingsOpen(true)} onChoose={choose} onNavigate={navigate} />
+                       onCustomize={() => setSettingsOpen(true)} onChoose={choose} onNavigate={navigate}
+                       menuExpanded={menuExpanded} onMenu={toggleMenu} extraTools={mainMax} />
           )}
         </main>
         <aside className="pane pane--side" aria-label="승인 대기와 알림함">

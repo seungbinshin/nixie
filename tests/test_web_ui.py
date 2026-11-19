@@ -151,7 +151,10 @@ def test_chat_inbox_links_deeplink_and_mobile(stack, browser):
     try:
         assert page.get_by_role("group", name="화면 선택").is_visible()
         assert page.evaluate("document.scrollingElement.scrollWidth <= window.innerWidth")
-        page.get_by_role("button", name="대화방").click()
+        page.get_by_role("button", name="대화방", exact=True).click()
+        assert page.locator(".rooms").is_visible() and not page.locator("main").is_visible()
+        page.get_by_role("button", name="대화", exact=True).click()
+        page.get_by_role("button", name="대화방 목록").click()  # round menu button in the chat header
         assert page.locator(".rooms").is_visible() and not page.locator("main").is_visible()
         page.get_by_role("button", name="승인·알림").click()
         assert page.get_by_role("heading", name="알림함").is_visible()
@@ -201,7 +204,7 @@ def test_character_theme_markdown_panels_concurrency_wiki(stack, browser):
         box.press("Enter")
         strong = page.locator(".md strong", has_text="최근 보관 문서")
         strong.wait_for(timeout=20000)
-        link = page.locator(".md a[href^='/?wiki=']").first
+        link = page.locator(".md a[href^='/?wiki=']", has_text="회의는 오전이 좋음").first  # order depends on which request ended first
         assert link.is_visible()
 
         # panels: minimize and maximize with the keyboard; Esc restores
