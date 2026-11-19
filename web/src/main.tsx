@@ -1,7 +1,14 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import "@fontsource/gowun-dodum/400.css";
+import "@fontsource/jua/400.css";
+import "@fontsource/dongle/400.css";
+import "@fontsource/dongle/700.css";
 import { App } from "./App";
+import { applyTheme, cachedTheme } from "./theme";
 import "./styles.css";
+
+applyTheme(cachedTheme()); // last theme of this browser until the profile arrives (no flash of other colors)
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

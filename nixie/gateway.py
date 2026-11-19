@@ -44,6 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from google.protobuf.json_format import MessageToDict
 
 from .config import AgentConfig, load_config
+from .profile import load_profile
 from .sandbox import SandboxManager, check_user
 from .store import read_changes
 
@@ -286,7 +287,7 @@ def create_gateway(manager: SandboxManager, admin_token: str = "", reap_interval
             cfg = directory.config(user)
         except (ValueError, FileNotFoundError) as e:
             raise HTTPException(404, str(e)) from e
-        return JSONResponse(MessageToDict(agent_card(cfg)))
+        return JSONResponse(MessageToDict(agent_card(cfg, load_profile(manager.users_root / user))))
 
     # ------------------------------------------------------------------ session endpoints for the web UI
     @app.get("/auth/me")
@@ -300,7 +301,7 @@ def create_gateway(manager: SandboxManager, admin_token: str = "", reap_interval
         return JSONResponse({
             "user": ident.user, "sso_user": ident.sso_user, "name": cfg.owner_name, "auth": ident.method,
             "timezone": cfg.timezone, "api": f"/u/{ident.user}/owner", "stream": f"/u/{ident.user}/owner/stream",
-            "logout_url": "/auth/logout",
+            "logout_url": "/auth/logout", "profile": load_profile(manager.users_root / ident.user),
         }, headers={"Cache-Control": "no-store"})
 
     @app.post("/auth/session")

@@ -7,7 +7,8 @@ const gateway = process.env.NIXIE_GATEWAY ?? "http://127.0.0.1:8080";
 
 export default defineConfig({
   plugins: [react()],
-  build: { outDir: "dist", sourcemap: false, target: "es2021" },
+  // assetsInlineLimit 0: no data: URLs (the CSP allows fonts and images only from this origin)
+  build: { outDir: "dist", sourcemap: false, target: "es2021", assetsInlineLimit: 0 },
   server: {
     proxy: {
       "/u": { target: gateway, changeOrigin: false },

@@ -19,10 +19,7 @@ export function Inbox({ items, unread, onOpen, onInternalLink, onRead, onReadAll
   const [onlyUnread, setOnlyUnread] = useState(false);
   const shown = (items ?? []).filter((n) => !onlyUnread || !n.read_at);
   return (
-    <section className="panel" aria-labelledby="inbox-h">
-      <h2 id="inbox-h" className="pane-title" tabIndex={-1}>
-        알림함 {unread > 0 && <span className="count" aria-label={`읽지 않은 알림 ${unread}개`}>{unread}</span>}
-      </h2>
+    <>
       <div className="panel-tools">
         <label className="check">
           <input type="checkbox" checked={onlyUnread} onChange={(e) => setOnlyUnread(e.target.checked)} />
@@ -84,6 +81,6 @@ export function Inbox({ items, unread, onOpen, onInternalLink, onRead, onReadAll
           })}
         </ul>
       )}
-    </section>
+    </>
   );
 }

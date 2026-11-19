@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS room_reads (peer TEXT PRIMARY KEY, last_line_id INTEG
 CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, ts TEXT, kind TEXT, title TEXT, body TEXT,
   source TEXT, source_url TEXT, ref_type TEXT, ref_id TEXT, read_at TEXT, dedupe_key TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, topic TEXT, ref TEXT);
+CREATE TABLE IF NOT EXISTS archive (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE, ts TEXT, kind TEXT,
+  title TEXT, topic TEXT, tags TEXT, body TEXT, refs TEXT, follows TEXT, path TEXT, sha256 TEXT, prev_hash TEXT, hash TEXT);
+CREATE TRIGGER IF NOT EXISTS archive_no_update BEFORE UPDATE ON archive BEGIN SELECT RAISE(ABORT, 'archive is read-only'); END;
+CREATE TRIGGER IF NOT EXISTS archive_no_delete BEFORE DELETE ON archive BEGIN SELECT RAISE(ABORT, 'archive is read-only'); END;
 CREATE INDEX IF NOT EXISTS transcript_peer ON transcript (peer, id);
 """
 
@@ -41,7 +45,7 @@ CREATE INDEX IF NOT EXISTS transcript_peer ON transcript (peer, id);
 MIGRATIONS = {"approvals": {"decision": "TEXT", "decided_at": "TEXT", "result": "TEXT"}}
 
 # Topics of the change feed. The web UI reloads the matching panel.
-TOPIC_ROOM, TOPIC_CHAT, TOPIC_APPROVAL, TOPIC_NOTIFICATION = "room", "chat", "approval", "notification"
+TOPIC_ROOM, TOPIC_CHAT, TOPIC_APPROVAL, TOPIC_NOTIFICATION, TOPIC_ARCHIVE = "room", "chat", "approval", "notification", "archive"
 
 
 def _now() -> str:
@@ -264,6 +268,50 @@ class Store:
     def mark_all_notifications_read(self) -> int:
         return self._write("UPDATE notifications SET read_at=? WHERE read_at IS NULL", (_now(),),
                            bump=(TOPIC_NOTIFICATION, "*"))
+
+    # ---------------------------------------------------------------- work archive (append-only, hash chain)
+    def add_archive(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Insert one archived document. Fields: id, ts, kind, title, topic, tags, body, refs, follows, path, sha256."""
+        with self._lock:
+            row = self._db.execute("SELECT hash FROM archive ORDER BY seq DESC LIMIT 1").fetchone()
+            prev = row["hash"] if row else "0" * 64
+            tags, refs = json.dumps(doc["tags"], ensure_ascii=False), json.dumps(doc["refs"])
+            h = hashlib.sha256("|".join([prev, doc["id"], doc["ts"], doc["kind"], doc["title"], doc["topic"], tags,
+                                         doc["body"], refs, doc.get("follows") or "", doc["sha256"]]).encode()).hexdigest()
+            cur = self._db.execute(
+                "INSERT INTO archive (id, ts, kind, title, topic, tags, body, refs, follows, path, sha256, prev_hash, hash) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (doc["id"], doc["ts"], doc["kind"], doc["title"], doc["topic"], tags, doc["body"], refs,
+                 doc.get("follows"), doc["path"], doc["sha256"], prev, h))
+            self._bump(TOPIC_ARCHIVE, doc["id"])
+            self._db.commit()
+            return {**doc, "seq": cur.lastrowid, "hash": h}
+
+    @staticmethod
+    def _doc(r: sqlite3.Row) -> dict[str, Any]:
+        return dict(r) | {"tags": json.loads(r["tags"] or "[]"), "refs": json.loads(r["refs"] or "[]")}
+
+    def archive_docs(self, limit: int = 2000) -> list[dict[str, Any]]:
+        """Newest first."""
+        return [self._doc(r) for r in self._exec("SELECT * FROM archive ORDER BY seq DESC LIMIT ?", (limit,))]
+
+    def archive_doc(self, doc_id: str) -> dict[str, Any] | None:
+        rows = self._exec("SELECT * FROM archive WHERE id=?", (doc_id,))
+        return self._doc(rows[0]) if rows else None
+
+    def archive_by_topic(self, topic: str, limit: int = 3) -> list[dict[str, Any]]:
+        rows = self._exec("SELECT * FROM archive WHERE topic=? ORDER BY seq DESC LIMIT ?", (topic, limit))
+        return [self._doc(r) for r in rows]
+
+    def verify_archive(self) -> bool:
+        prev = "0" * 64
+        for r in self._exec("SELECT * FROM archive ORDER BY seq"):
+            h = hashlib.sha256("|".join([prev, r["id"], r["ts"], r["kind"], r["title"], r["topic"], r["tags"], r["body"],
+                                         r["refs"], r["follows"] or "", r["sha256"]]).encode()).hexdigest()
+            if r["prev_hash"] != prev or r["hash"] != h:
+                return False
+            prev = h
+        return True
 
     # ---------------------------------------------------------------- change feed
     def changes_since(self, seq: int, limit: int = 100) -> list[dict[str, Any]]:
